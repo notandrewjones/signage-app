@@ -636,10 +636,11 @@ function getItemDuration(item) {
 
 // Get current position within the playlist cycle
 function getCurrentCyclePosition() {
-    const now = Date.now() / 1000;
-    const serverNow = now + serverTimeOffset;
-    const elapsed = serverNow - syncStartTime;
-    return elapsed % totalCycleDuration;
+    const now = getServerTime();
+    const elapsed = now - syncStartTime;
+    const position = elapsed % totalCycleDuration;
+    // Handle edge case where position might be negative due to timing
+    return position < 0 ? position + totalCycleDuration : position;
 }
 
 // Find which item should be playing at a given position
@@ -653,6 +654,7 @@ function getItemAtPosition(position) {
             };
         }
     }
+    // Default to first item if position doesn't match any (shouldn't happen)
     return { index: 0, elapsed: 0, remaining: playlist[0]?._duration || 10 };
 }
 
@@ -874,17 +876,35 @@ let rafId = null;
 
 function scheduleNextTransition() {
     const item = playlist[currentIndex];
-    
-    // Calculate the ABSOLUTE server timestamp when this item ends
-    // This is the same for all devices regardless of when they calculate it
-    const cycleNumber = Math.floor((getServerTime() - syncStartTime) / totalCycleDuration);
-    const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
-    transitionTargetTime = cycleStartTime + item._endTime;
-    
     const now = getServerTime();
+    
+    // Calculate elapsed time since sync started
+    const elapsed = now - syncStartTime;
+    
+    // Calculate current position within the cycle
+    const cyclePosition = elapsed % totalCycleDuration;
+    
+    // Calculate the current cycle number
+    const cycleNumber = Math.floor(elapsed / totalCycleDuration);
+    
+    // Calculate when this cycle started
+    const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
+    
+    // The item ends at cycleStartTime + item._endTime
+    let targetTime = cycleStartTime + item._endTime;
+    
+    // If we're past this item's end time in the current cycle,
+    // we need to target the NEXT cycle's occurrence
+    if (targetTime <= now) {
+        targetTime += totalCycleDuration;
+        log(`Cycle boundary: targeting next cycle`);
+    }
+    
+    transitionTargetTime = targetTime;
+    
     const timeUntilTransition = transitionTargetTime - now;
     
-    log(`Next transition at ${transitionTargetTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
+    log(`Item ${currentIndex} ends at ${item._endTime.toFixed(1)}s in cycle. Target: ${transitionTargetTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
     
     // Start the animation frame loop if not already running
     if (!rafId) {
