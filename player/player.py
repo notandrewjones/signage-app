@@ -918,6 +918,9 @@ function transitionLoop(timestamp) {
     
     if (remaining <= 0.008) {  // Within 8ms (half a frame) - fire now
         rafId = null;
+        const actualFiringTime = getServerTime();
+        const drift = (actualFiringTime - transitionTargetTime) * 1000;
+        log(`>>> TRANSITION FIRED at ${actualFiringTime.toFixed(3)}, target was ${transitionTargetTime.toFixed(3)}, drift: ${drift.toFixed(1)}ms`);
         doSyncedTransition();
     } else {
         // Keep looping
