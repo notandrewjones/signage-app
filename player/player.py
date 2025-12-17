@@ -549,95 +549,57 @@ function getUrl(item) {
 
 // ============================================================
 // DIRECT HTTP TIME SYNCHRONIZATION
-// JavaScript fetches time directly from server - no pywebview bridge
+// Simplified: just verify clocks are close, use local time
 // ============================================================
 
 async function performTimeSync() {
-    log('Performing direct HTTP time sync...');
-    const measurements = [];
-    const NUM_SAMPLES = 7;
+    log('Checking time sync with server...');
     
-    for (let i = 0; i < NUM_SAMPLES; i++) {
-        try {
-            // All times in SECONDS for consistency with server
-            const t1 = Date.now() / 1000;  // Local wall clock at send (seconds)
-            
-            const response = await fetch(serverUrl + '/api/time', {
-                method: 'GET',
-                cache: 'no-store'  // Prevent caching
-            });
-            
-            const t4 = Date.now() / 1000;  // Local wall clock at receive (seconds)
-            const data = await response.json();
-            const t2 = data.time;  // Server timestamp (seconds)
-            
-            // Classic NTP calculation:
-            // t1 = local time when request sent
-            // t2 = server time when request received (≈ when server generated response)
-            // t3 = server time when response sent (same as t2 for us)
-            // t4 = local time when response received
-            // 
-            // offset = ((t2 - t1) + (t3 - t4)) / 2
-            // Since t2 = t3: offset = ((t2 - t1) + (t2 - t4)) / 2 = t2 - (t1 + t4) / 2
-            
-            const roundTrip = t4 - t1;
-            const offset = t2 - (t1 + t4) / 2;
-            
-            measurements.push({
-                offset: offset,
-                roundTrip: roundTrip,
-                t1: t1,
-                t2: t2,
-                t4: t4
-            });
-            
-            log(`Time sample ${i+1}: offset=${(offset*1000).toFixed(1)}ms, RTT=${(roundTrip*1000).toFixed(1)}ms`);
-            
-        } catch (e) {
-            log(`Time sample ${i+1} failed: ${e.message}`);
+    try {
+        const localBefore = Date.now() / 1000;
+        
+        const response = await fetch(serverUrl + '/api/time', {
+            method: 'GET',
+            cache: 'no-store'
+        });
+        
+        const localAfter = Date.now() / 1000;
+        const data = await response.json();
+        const serverTime = data.time;
+        
+        // Calculate approximate offset (for display/debugging only)
+        const roundTrip = localAfter - localBefore;
+        const localMidpoint = (localBefore + localAfter) / 2;
+        const offset = serverTime - localMidpoint;
+        
+        log(`Server time: ${serverTime.toFixed(3)}, Local: ${localMidpoint.toFixed(3)}, Offset: ${(offset*1000).toFixed(0)}ms, RTT: ${(roundTrip*1000).toFixed(0)}ms`);
+        
+        // Warn if clocks are way off
+        if (Math.abs(offset) > 1) {
+            log(`WARNING: Device clock is ${offset.toFixed(1)}s off from server!`);
         }
         
-        // Small delay between samples
-        if (i < NUM_SAMPLES - 1) {
-            await new Promise(r => setTimeout(r, 100));
-        }
-    }
-    
-    if (measurements.length === 0) {
-        log('Time sync failed - no valid samples');
+        return offset;
+        
+    } catch (e) {
+        log(`Time sync failed: ${e.message}`);
         return 0;
     }
-    
-    // Sort by round trip time - lowest RTT = most accurate
-    measurements.sort((a, b) => a.roundTrip - b.roundTrip);
-    
-    // Take median of the best 3 measurements for stability
-    const bestMeasurements = measurements.slice(0, Math.min(3, measurements.length));
-    const avgOffset = bestMeasurements.reduce((sum, m) => sum + m.offset, 0) / bestMeasurements.length;
-    
-    log(`SYNC RESULT: offset=${(avgOffset*1000).toFixed(1)}ms (best RTT=${(measurements[0].roundTrip*1000).toFixed(1)}ms)`);
-    
-    return avgOffset;
 }
 
-// Get current server time (local time adjusted by offset)
+// Get current time for sync calculations
+// Use LOCAL time directly - both devices should have accurate system clocks
 function getServerTime() {
-    return (Date.now() / 1000) + serverTimeOffset;
+    return Date.now() / 1000;
 }
 
-// Start periodic time resync
+// Start periodic time check (just for monitoring, not used for sync)
 let timeSyncInterval = null;
 function startTimeSyncLoop() {
-    // Sync every 30 seconds to maintain accuracy
     if (timeSyncInterval) clearInterval(timeSyncInterval);
     timeSyncInterval = setInterval(async () => {
-        const newOffset = await performTimeSync();
-        const drift = Math.abs(newOffset - serverTimeOffset);
-        if (drift > 0.02) {  // Only update if drift > 20ms
-            log(`Time drift detected: ${(drift*1000).toFixed(1)}ms - updating offset`);
-            serverTimeOffset = newOffset;
-        }
-    }, 30000);
+        await performTimeSync();  // Just log, don't use the offset
+    }, 60000);  // Check every 60 seconds
 }
 
 function stopTimeSyncLoop() {
@@ -770,8 +732,8 @@ async function syncAndPlay() {
     updateSyncIndicator('syncing', 'Syncing...');
     
     try {
-        // First, perform accurate NTP-style time synchronization
-        serverTimeOffset = await performTimeSync();
+        // Check time sync (for debugging only - we use local time directly)
+        await performTimeSync();
         
         const r = await pywebview.api.get_playlist();
         
@@ -789,11 +751,13 @@ async function syncAndPlay() {
         transitionType = r.transition_type || 'cut';
         transitionDuration = r.transition_duration || 0.5;
         
-        // Extract sync timing info
+        // Extract sync timing info - syncStartTime is the key!
+        // Both devices get the SAME syncStartTime from the server
         if (r.sync) {
             syncStartTime = r.sync.start_time || 0;
             totalCycleDuration = r.sync.total_duration || 0;
-            log(`Sync info: start=${syncStartTime.toFixed(0)}, cycle=${totalCycleDuration.toFixed(1)}s, offset=${serverTimeOffset.toFixed(4)}s`);
+            log(`Sync info: syncStartTime=${syncStartTime.toFixed(3)}, cycle=${totalCycleDuration.toFixed(1)}s`);
+            log(`Local time: ${(Date.now()/1000).toFixed(3)}, elapsed since sync: ${((Date.now()/1000) - syncStartTime).toFixed(1)}s`);
         }
         
         applyOrientation();
@@ -1233,13 +1197,14 @@ function updateDebug() {
     
     o.innerHTML = `<b>SYNC DEBUG (D=close R=resync S=setup)</b>
 
-Server Time: ${serverNow.toFixed(3)}
-Server Offset: ${(serverTimeOffset * 1000).toFixed(1)}ms
-Sync Start: ${syncStartTime.toFixed(3)}
+LOCAL TIME: ${serverNow.toFixed(3)}
+Sync Start (from server): ${syncStartTime.toFixed(3)}
+Elapsed since sync: ${(serverNow - syncStartTime).toFixed(3)}s
 Cycle Duration: ${totalCycleDuration.toFixed(1)}s
 Cycle Position: ${pos.toFixed(3)}s
 
-NEXT TRANSITION: ${nextTransitionTime.toFixed(3)} (in ${msUntilTransition}ms)
+NEXT TRANSITION AT: ${nextTransitionTime.toFixed(3)}
+TIME UNTIL TRANSITION: ${msUntilTransition}ms
 
 Playlist: ${playlist.length} items
 Current Item: ${currentIndex} "${item?.name || 'N/A'}"
@@ -1252,7 +1217,7 @@ Items:
 ${playlist.map((p, i) => `  ${i === currentIndex ? '>' : ' '} ${i}: ${p.name} [${p._startTime?.toFixed(1)}-${p._endTime?.toFixed(1)}s]`).join('\n')}
 
 Log:
-${debugLog.slice(-15).join('\n')}`;
+${debugLog.slice(-12).join('\n')}`;
 }
 
 function hideDebug() {
