@@ -1,0 +1,60 @@
+# Embedded Python (downloaded by setup.bat)
+python/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads (user content)
+server/uploads/content/*
+server/uploads/logos/*
+server/uploads/backgrounds/*
+!server/uploads/content/.gitkeep
+!server/uploads/logos/.gitkeep
+!server/uploads/backgrounds/.gitkeep
+
+# Node.js
+node_modules/
+web-ui/node_modules/
+web-ui/dist/
+.npm
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.local
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp files
+*.tmp
+*.temp
+*.bak

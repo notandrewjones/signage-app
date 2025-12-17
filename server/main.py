@@ -3,12 +3,17 @@ Digital Signage System - Server API
 FastAPI backend for managing content, schedules, and devices
 """
 import os
+import sys
 import uuid
 import asyncio
 import hashlib
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+
+# Add the server directory to Python path for imports
+SERVER_DIR = Path(__file__).parent.absolute()
+sys.path.insert(0, str(SERVER_DIR))
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.staticfiles import StaticFiles
@@ -25,8 +30,8 @@ from models import (
 )
 
 # Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./signage.db")
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SERVER_DIR}/signage.db")
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", SERVER_DIR / "uploads"))
 CONTENT_DIR = UPLOAD_DIR / "content"
 LOGOS_DIR = UPLOAD_DIR / "logos"
 BACKGROUNDS_DIR = UPLOAD_DIR / "backgrounds"

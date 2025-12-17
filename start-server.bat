@@ -6,6 +6,10 @@ echo   Digital Signage Server
 echo ============================================
 echo.
 
+:: Get the directory where this script is located
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%"
+
 :: Check if setup has been run
 if not exist "python\python.exe" (
     echo ERROR: Python not found. Please run setup.bat first.
@@ -26,7 +30,6 @@ echo Press Ctrl+C to stop the server
 echo ============================================
 echo.
 
-cd server
-..\python\python.exe main.py
+python\python.exe server\main.py
 
 pause
