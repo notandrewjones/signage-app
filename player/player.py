@@ -904,72 +904,52 @@ function showSyncedItem(elapsedInItem) {
     scheduleNextTransition();
 }
 
+// Use a single requestAnimationFrame loop for precise timing
+let transitionTargetTime = 0;
+let rafId = null;
+
 function scheduleNextTransition() {
-    if (playbackTimer) {
-        clearTimeout(playbackTimer);
-        playbackTimer = null;
-    }
-    
     const item = playlist[currentIndex];
     
     // Calculate the ABSOLUTE server timestamp when this item ends
     // This is the same for all devices regardless of when they calculate it
     const cycleNumber = Math.floor((getServerTime() - syncStartTime) / totalCycleDuration);
     const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
-    const absoluteTransitionTime = cycleStartTime + item._endTime;
+    transitionTargetTime = cycleStartTime + item._endTime;
     
-    // Calculate how long until that absolute time
     const now = getServerTime();
-    const timeUntilTransition = absoluteTransitionTime - now;
+    const timeUntilTransition = transitionTargetTime - now;
     
-    log(`Next transition at server time ${absoluteTransitionTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
+    log(`Next transition at ${transitionTargetTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
     
-    if (timeUntilTransition <= 0) {
-        // Already past transition time, do it now
+    // Start the animation frame loop if not already running
+    if (!rafId) {
+        rafId = requestAnimationFrame(transitionLoop);
+    }
+}
+
+function transitionLoop(timestamp) {
+    const now = getServerTime();
+    const remaining = transitionTargetTime - now;
+    
+    if (remaining <= 0.008) {  // Within 8ms (half a frame) - fire now
+        rafId = null;
         doSyncedTransition();
-        return;
-    }
-    
-    if (timeUntilTransition > 0.5) {
-        // More than 500ms away - use setTimeout for most of the wait, then switch to tight polling
-        const roughDelay = (timeUntilTransition - 0.1) * 1000; // Leave 100ms for tight polling
-        playbackTimer = setTimeout(() => {
-            waitForExactTransition(absoluteTransitionTime);
-        }, roughDelay);
     } else {
-        // Less than 500ms - go straight to tight polling
-        waitForExactTransition(absoluteTransitionTime);
+        // Keep looping
+        rafId = requestAnimationFrame(transitionLoop);
     }
 }
 
-// Tight polling loop for precise transition timing
-function waitForExactTransition(targetTime) {
-    const check = () => {
-        const now = getServerTime();
-        const remaining = targetTime - now;
-        
-        if (remaining <= 0.005) {  // Within 5ms - close enough, fire now
-            doSyncedTransition();
-        } else if (remaining < 0.016) {  // Within 16ms - use requestAnimationFrame
-            requestAnimationFrame(() => doSyncedTransition());
-        } else {
-            // Keep polling with short setTimeout
-            playbackTimer = setTimeout(check, Math.min(remaining * 500, 10)); // Poll faster as we get closer
-        }
-    };
-    check();
-}
-
-// Get current server time (local time adjusted by offset)
-function getServerTime() {
-    return (Date.now() / 1000) + serverTimeOffset;
+function stopTransitionLoop() {
+    if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+    }
 }
 
 async function doSyncedTransition() {
-    if (playbackTimer) {
-        clearTimeout(playbackTimer);
-        playbackTimer = null;
-    }
+    stopTransitionLoop();
     
     // Stop current video
     const currentLayer = contentLayers[activeLayer];
@@ -1131,6 +1111,7 @@ function stopPolling() {
 }
 
 function stopPlayback() {
+    stopTransitionLoop();
     if (playbackTimer) { clearTimeout(playbackTimer); playbackTimer = null; }
     if (syncCheckInterval) { clearInterval(syncCheckInterval); syncCheckInterval = null; }
     stopPolling();
