@@ -11,6 +11,7 @@ __pycache__/
 *.egg
 dist/
 build/
+*.spec
 .eggs/
 
 # Database
@@ -18,13 +19,16 @@ build/
 *.sqlite
 *.sqlite3
 
-# Uploads (user content)
+# Server uploads (user content)
 server/uploads/content/*
 server/uploads/logos/*
 server/uploads/backgrounds/*
 !server/uploads/content/.gitkeep
 !server/uploads/logos/.gitkeep
 !server/uploads/backgrounds/.gitkeep
+
+# Player data (downloaded content and config)
+player/data/
 
 # Node.js
 node_modules/
