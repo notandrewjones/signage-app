@@ -279,19 +279,25 @@ PLAYER_HTML = '''
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
-        body {
+        html, body {
+            width: 100%;
+            height: 100%;
             background: #000;
             overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }
         
         #content-container {
-            width: 100vw;
-            height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            height: 100%;
             display: flex;
             align-items: center;
             justify-content: center;
-            position: relative;
         }
         
         #background {
@@ -630,23 +636,6 @@ PLAYER_HTML = '''
             margin-bottom: 8px;
         }
         
-        /* Loading indicator */
-        #loading {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: rgba(0,0,0,0.8);
-            color: white;
-            padding: 12px 20px;
-            border-radius: 10px;
-            font-size: 14px;
-            z-index: 100;
-            display: none;
-            backdrop-filter: blur(10px);
-        }
-        
-        #loading.active { display: flex; align-items: center; gap: 10px; }
-        
         .spinner {
             width: 16px;
             height: 16px;
@@ -715,11 +704,6 @@ PLAYER_HTML = '''
                 <p class="setup-subtitle">Starting playback...</p>
             </div>
         </div>
-    </div>
-    
-    <div id="loading">
-        <div class="spinner"></div>
-        <span>Syncing...</span>
     </div>
     
     <script>
@@ -1055,12 +1039,9 @@ PLAYER_HTML = '''
         
         function startSyncLoop() {
             syncInterval = setInterval(() => {
-                document.getElementById('loading').classList.add('active');
-                
                 let syncFn = getApi('sync_content');
                 if (syncFn) {
                     syncFn().then(result => {
-                        document.getElementById('loading').classList.remove('active');
                         if (result.success) {
                             playlist = result.playlist;
                             defaultDisplay = result.default_display;
@@ -1394,7 +1375,7 @@ def main():
     # Create API
     api = PlayerAPI(player)
     
-    # Create window
+    # Create window - frameless for true fullscreen
     window = webview.create_window(
         'Signage Player',
         html=PLAYER_HTML,
@@ -1402,9 +1383,10 @@ def main():
         width=config.window_width,
         height=config.window_height,
         resizable=True,
-        frameless=False,
+        frameless=True,
         easy_drag=False,
-        background_color='#000000'
+        background_color='#000000',
+        fullscreen=config.fullscreen
     )
     
     api.set_window(window)
@@ -1426,9 +1408,9 @@ def main():
     
     window.events.loaded += on_loaded
     
-    # Start webview with debug to see console
-    logger.info("Starting webview with debug=True to see JS console")
-    webview.start(debug=True)
+    # Start webview
+    logger.info("Starting webview")
+    webview.start(debug=False)
 
 
 if __name__ == "__main__":
