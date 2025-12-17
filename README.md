@@ -2,6 +2,25 @@
 
 A complete digital signage solution with a central control server and lightweight player clients.
 
+## Quick Start (Windows)
+
+1. **Extract the zip file** to a folder (e.g., `C:\signage-system`)
+
+2. **Run setup** (first time only):
+   - Double-click `setup.bat`
+   - This downloads a local Python and installs dependencies
+   - No system-wide Python installation required!
+
+3. **Start the system**:
+   - Double-click `start.bat` to run everything
+   - Or run individually:
+     - `start-server.bat` - API server on http://localhost:8000
+     - `start-ui.bat` - Web UI on http://localhost:5173 (requires Node.js)
+
+4. **Open the control panel**: http://localhost:5173
+
+> **Note**: The Web UI requires [Node.js](https://nodejs.org/). The server works without it.
+
 ## Features
 
 - **Content Groups**: Organize media (images, videos) into logical groups (e.g., "Gym Promotions", "Check-in Info")
