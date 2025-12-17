@@ -19,7 +19,7 @@ if %errorlevel% neq 0 (
 python -c "import webview" 2>nul
 if %errorlevel% neq 0 (
     echo Installing dependencies...
-    pip install pywebview
+    python -m pip install pywebview
 )
 
 :: Run the player
