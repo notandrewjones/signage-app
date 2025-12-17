@@ -588,18 +588,23 @@ async function performTimeSync() {
 }
 
 // Get current time for sync calculations
-// Use LOCAL time directly - both devices should have accurate system clocks
+// Use LOCAL time adjusted by server offset for accuracy
 function getServerTime() {
-    return Date.now() / 1000;
+    return (Date.now() / 1000) + serverTimeOffset;
 }
 
-// Start periodic time check (just for monitoring, not used for sync)
+// Start periodic time sync to maintain accuracy
 let timeSyncInterval = null;
 function startTimeSyncLoop() {
     if (timeSyncInterval) clearInterval(timeSyncInterval);
     timeSyncInterval = setInterval(async () => {
-        await performTimeSync();  // Just log, don't use the offset
-    }, 60000);  // Check every 60 seconds
+        const newOffset = await performTimeSync();
+        const drift = Math.abs(newOffset - serverTimeOffset);
+        if (drift > 0.05) {  // Only update if drift > 50ms
+            log(`Offset drift detected: ${(drift*1000).toFixed(0)}ms - updating from ${(serverTimeOffset*1000).toFixed(0)}ms to ${(newOffset*1000).toFixed(0)}ms`);
+            serverTimeOffset = newOffset;
+        }
+    }, 30000);  // Check every 30 seconds
 }
 
 function stopTimeSyncLoop() {
@@ -734,8 +739,9 @@ async function syncAndPlay() {
     updateSyncIndicator('syncing', 'Syncing...');
     
     try {
-        // Check time sync (for debugging only - we use local time directly)
-        await performTimeSync();
+        // Perform time sync and set the offset
+        serverTimeOffset = await performTimeSync();
+        log(`Time offset set to: ${(serverTimeOffset*1000).toFixed(0)}ms`);
         
         const r = await pywebview.api.get_playlist();
         
@@ -1220,9 +1226,10 @@ function updateDebug() {
     
     o.innerHTML = `<b>SYNC DEBUG (D=close R=resync S=setup)</b>
 
-LOCAL TIME: ${serverNow.toFixed(3)}
-Sync Start (from server): ${syncStartTime.toFixed(3)}
-Elapsed since sync: ${(serverNow - syncStartTime).toFixed(3)}s
+SERVER TIME (adjusted): ${serverNow.toFixed(3)}
+Local Time (raw): ${(Date.now()/1000).toFixed(3)}
+OFFSET: ${(serverTimeOffset*1000).toFixed(0)}ms
+Sync Start: ${syncStartTime.toFixed(3)}
 Cycle Duration: ${totalCycleDuration.toFixed(1)}s
 Cycle Position: ${pos.toFixed(3)}s
 
@@ -1234,13 +1241,9 @@ Current Item: ${currentIndex} "${item?.name || 'N/A'}"
 Should Be: ${index} (${elapsed.toFixed(3)}s in, ${remaining.toFixed(3)}s left)
 Video Drift: ${videoDrift}
 Active Layer: ${activeLayer}
-Transition: ${transitionType} (${transitionDuration}s)
-
-Items:
-${playlist.map((p, i) => `  ${i === currentIndex ? '>' : ' '} ${i}: ${p.name} [${p._startTime?.toFixed(1)}-${p._endTime?.toFixed(1)}s]`).join('\n')}
 
 Log:
-${debugLog.slice(-12).join('\n')}`;
+${debugLog.slice(-10).join('\n')}`;
 }
 
 function hideDebug() {
