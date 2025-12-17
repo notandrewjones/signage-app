@@ -962,6 +962,36 @@ function transitionLoop(timestamp) {
     }
 }
 
+// Alternative approach: fire transitions at fixed time boundaries
+// This ensures both devices execute at the same "wall clock moment"
+function scheduleAlignedTransition() {
+    const item = playlist[currentIndex];
+    const now = getServerTime();
+    
+    // Calculate when this item should end
+    const elapsed = now - syncStartTime;
+    const cycleNumber = Math.floor(elapsed / totalCycleDuration);
+    const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
+    let targetTime = cycleStartTime + item._endTime;
+    
+    if (targetTime <= now) {
+        targetTime += totalCycleDuration;
+    }
+    
+    // Round target to nearest 50ms boundary for consistency across devices
+    // Both devices will aim for the exact same millisecond
+    const alignedTarget = Math.ceil(targetTime * 20) / 20;  // Round up to next 50ms
+    
+    transitionTargetTime = alignedTarget;
+    
+    const timeUntilTransition = transitionTargetTime - now;
+    log(`Aligned target: ${transitionTargetTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
+    
+    if (!rafId) {
+        rafId = requestAnimationFrame(transitionLoop);
+    }
+}
+
 function stopTransitionLoop() {
     if (rafId) {
         cancelAnimationFrame(rafId);
@@ -971,8 +1001,6 @@ function stopTransitionLoop() {
 
 async function doSyncedTransition() {
     stopTransitionLoop();
-    
-    const transitionStartTime = Date.now();
     
     // Calculate what should be playing NOW
     const position = getCurrentCyclePosition();
@@ -984,16 +1012,15 @@ async function doSyncedTransition() {
     const newLayer = contentLayers[nextLayer];
     const oldLayer = contentLayers[activeLayer];
     
-    // IMMEDIATELY perform the visual transition - this is the critical sync point
+    // IMMEDIATELY perform the visual transition - synchronous, no RAF wrapper
     newLayer.style.zIndex = '2';
     newLayer.classList.add('active');
     oldLayer.style.zIndex = '1';
     oldLayer.classList.remove('active');
     
-    const visualChangeTime = Date.now();
-    log(`Visual change at local=${visualChangeTime}, took ${visualChangeTime - transitionStartTime}ms from FIRED`);
+    log(`Visual swap done at ${Date.now()}`);
     
-    // Stop current video (after visual change)
+    // Stop current video
     const video = oldLayer.querySelector('video');
     if (video) {
         video.pause();
@@ -1006,14 +1033,14 @@ async function doSyncedTransition() {
     log(`Transition to item ${currentIndex} "${playlist[currentIndex]?.name}"`);
     updateSyncIndicator('synced', `Item ${currentIndex+1}/${playlist.length}`);
     
-    // Handle video seeking if needed (for videos)
+    // Handle video seeking if needed
     const newVideo = newLayer.querySelector('video');
     if (newVideo && playlist[currentIndex]?.file_type === 'video') {
         newVideo.currentTime = elapsed;
         newVideo.play().catch(e => log('Video play error: ' + e.message));
     }
     
-    // Preload next item in background (non-blocking)
+    // Preload next item in background
     const preloadIndex = (currentIndex + 1) % playlist.length;
     preload(preloadIndex, 1 - activeLayer);
     
