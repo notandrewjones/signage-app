@@ -876,18 +876,66 @@ function scheduleNextTransition() {
     }
     
     const item = playlist[currentIndex];
-    const position = getCurrentCyclePosition();
-    const timeUntilEnd = item._endTime - position;
     
-    // Schedule transition slightly before to account for processing
-    const delay = Math.max(0, timeUntilEnd * 1000 - 100);
+    // Calculate the ABSOLUTE server timestamp when this item ends
+    // This is the same for all devices regardless of when they calculate it
+    const cycleNumber = Math.floor((getServerTime() - syncStartTime) / totalCycleDuration);
+    const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
+    const absoluteTransitionTime = cycleStartTime + item._endTime;
     
-    log(`Next transition in ${(delay/1000).toFixed(2)}s`);
+    // Calculate how long until that absolute time
+    const now = getServerTime();
+    const timeUntilTransition = absoluteTransitionTime - now;
     
-    playbackTimer = setTimeout(() => doSyncedTransition(), delay);
+    log(`Next transition at server time ${absoluteTransitionTime.toFixed(3)}, in ${(timeUntilTransition*1000).toFixed(0)}ms`);
+    
+    if (timeUntilTransition <= 0) {
+        // Already past transition time, do it now
+        doSyncedTransition();
+        return;
+    }
+    
+    if (timeUntilTransition > 0.5) {
+        // More than 500ms away - use setTimeout for most of the wait, then switch to tight polling
+        const roughDelay = (timeUntilTransition - 0.1) * 1000; // Leave 100ms for tight polling
+        playbackTimer = setTimeout(() => {
+            waitForExactTransition(absoluteTransitionTime);
+        }, roughDelay);
+    } else {
+        // Less than 500ms - go straight to tight polling
+        waitForExactTransition(absoluteTransitionTime);
+    }
+}
+
+// Tight polling loop for precise transition timing
+function waitForExactTransition(targetTime) {
+    const check = () => {
+        const now = getServerTime();
+        const remaining = targetTime - now;
+        
+        if (remaining <= 0.005) {  // Within 5ms - close enough, fire now
+            doSyncedTransition();
+        } else if (remaining < 0.016) {  // Within 16ms - use requestAnimationFrame
+            requestAnimationFrame(() => doSyncedTransition());
+        } else {
+            // Keep polling with short setTimeout
+            playbackTimer = setTimeout(check, Math.min(remaining * 500, 10)); // Poll faster as we get closer
+        }
+    };
+    check();
+}
+
+// Get current server time (local time adjusted by offset)
+function getServerTime() {
+    return (Date.now() / 1000) + serverTimeOffset;
 }
 
 async function doSyncedTransition() {
+    if (playbackTimer) {
+        clearTimeout(playbackTimer);
+        playbackTimer = null;
+    }
+    
     // Stop current video
     const currentLayer = contentLayers[activeLayer];
     const video = currentLayer.querySelector('video');
@@ -1161,6 +1209,16 @@ function updateDebug() {
     const item = playlist[currentIndex];
     const pos = getCurrentCyclePosition();
     const { index, elapsed, remaining } = getItemAtPosition(pos);
+    const serverNow = getServerTime();
+    
+    // Calculate absolute next transition time (same calc as scheduleNextTransition)
+    let nextTransitionTime = 0;
+    if (item && totalCycleDuration > 0) {
+        const cycleNumber = Math.floor((serverNow - syncStartTime) / totalCycleDuration);
+        const cycleStartTime = syncStartTime + (cycleNumber * totalCycleDuration);
+        nextTransitionTime = cycleStartTime + item._endTime;
+    }
+    const msUntilTransition = ((nextTransitionTime - serverNow) * 1000).toFixed(0);
     
     // Get video drift if applicable
     let videoDrift = 'N/A';
@@ -1172,10 +1230,13 @@ function updateDebug() {
     
     o.innerHTML = `<b>SYNC DEBUG (D=close R=resync S=setup)</b>
 
-Sync Start: ${new Date(syncStartTime * 1000).toLocaleTimeString()}
-Cycle Duration: ${totalCycleDuration.toFixed(1)}s
+Server Time: ${serverNow.toFixed(3)}
 Server Offset: ${(serverTimeOffset * 1000).toFixed(1)}ms
-Current Position: ${pos.toFixed(3)}s
+Sync Start: ${syncStartTime.toFixed(3)}
+Cycle Duration: ${totalCycleDuration.toFixed(1)}s
+Cycle Position: ${pos.toFixed(3)}s
+
+NEXT TRANSITION: ${nextTransitionTime.toFixed(3)} (in ${msUntilTransition}ms)
 
 Playlist: ${playlist.length} items
 Current Item: ${currentIndex} "${item?.name || 'N/A'}"
@@ -1188,7 +1249,7 @@ Items:
 ${playlist.map((p, i) => `  ${i === currentIndex ? '>' : ' '} ${i}: ${p.name} [${p._startTime?.toFixed(1)}-${p._endTime?.toFixed(1)}s]`).join('\n')}
 
 Log:
-${debugLog.slice(-20).join('\n')}`;
+${debugLog.slice(-15).join('\n')}`;
 }
 
 function hideDebug() {
