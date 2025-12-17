@@ -5,8 +5,10 @@ FastAPI backend for managing content, schedules, and devices
 import os
 import sys
 import uuid
+import random
 import asyncio
 import hashlib
+import socket
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -35,6 +37,27 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", SERVER_DIR / "uploads"))
 CONTENT_DIR = UPLOAD_DIR / "content"
 LOGOS_DIR = UPLOAD_DIR / "logos"
 BACKGROUNDS_DIR = UPLOAD_DIR / "backgrounds"
+
+
+def generate_access_code(db: Session) -> str:
+    """Generate a unique 6-digit access code"""
+    while True:
+        code = str(random.randint(100000, 999999))
+        existing = db.query(Device).filter(Device.access_code == code).first()
+        if not existing:
+            return code
+
+
+def get_local_ip() -> str:
+    """Get the local IP address of this machine"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 # Ensure directories exist
 for dir_path in [CONTENT_DIR, LOGOS_DIR, BACKGROUNDS_DIR]:
@@ -240,13 +263,14 @@ def serialize_device(device: Device) -> dict:
     return {
         "id": device.id,
         "name": device.name,
-        "device_key": device.device_key,
+        "access_code": device.access_code,
         "description": device.description,
         "location": device.location,
         "ip_address": device.ip_address,
         "last_seen": device.last_seen.isoformat() if device.last_seen else None,
         "is_online": device.is_online,
         "is_active": device.is_active,
+        "is_registered": device.is_registered,
         "screen_width": device.screen_width,
         "screen_height": device.screen_height,
         "schedule_group_id": device.schedule_group_id,
@@ -599,7 +623,8 @@ def create_device(data: DeviceCreate, db: Session = Depends(get_db)):
         name=data.name,
         description=data.description,
         location=data.location,
-        device_key=uuid.uuid4().hex,
+        access_code=generate_access_code(db),
+        is_registered=False,
     )
     db.add(device)
     db.commit()
@@ -654,16 +679,17 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "deleted"}
 
-@app.post("/api/devices/{device_id}/regenerate-key")
-def regenerate_device_key(device_id: int, db: Session = Depends(get_db)):
+@app.post("/api/devices/{device_id}/regenerate-code")
+def regenerate_access_code(device_id: int, db: Session = Depends(get_db)):
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
-    device.device_key = uuid.uuid4().hex
+    device.access_code = generate_access_code(db)
+    device.is_registered = False  # Require re-registration
     db.commit()
     db.refresh(device)
-    return {"device_key": device.device_key}
+    return {"access_code": device.access_code}
 
 # ============== Default Display ==============
 
@@ -806,13 +832,46 @@ async def delete_background(background_id: int, db: Session = Depends(get_db)):
 
 # ============== Player API ==============
 
-@app.get("/api/player/{device_key}/config")
-def get_player_config(device_key: str, db: Session = Depends(get_db)):
+@app.get("/api/discover")
+def discover_server():
+    """Endpoint for players to discover this server"""
+    return {
+        "name": "Digital Signage Server",
+        "version": "1.0.0",
+        "ip": get_local_ip(),
+        "port": 8000,
+    }
+
+@app.post("/api/player/register")
+def register_player(access_code: str = Form(...), db: Session = Depends(get_db)):
+    """Register a player with an access code"""
+    device = db.query(Device).filter(Device.access_code == access_code).first()
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Invalid access code")
+    
+    if not device.is_active:
+        raise HTTPException(status_code=403, detail="Device is disabled")
+    
+    # Mark as registered
+    device.is_registered = True
+    device.last_seen = datetime.utcnow()
+    db.commit()
+    
+    return {
+        "success": True,
+        "device_name": device.name,
+        "device_id": device.id,
+        "access_code": device.access_code,
+    }
+
+@app.get("/api/player/{access_code}/config")
+def get_player_config(access_code: str, db: Session = Depends(get_db)):
     """Get configuration for a player device"""
     device = db.query(Device).options(
         joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules).joinedload(Schedule.content_groups).joinedload(ContentGroup.content_items),
         joinedload(Device.content_groups).joinedload(ContentGroup.content_items)
-    ).filter(Device.device_key == device_key).first()
+    ).filter(Device.access_code == access_code).first()
     
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -851,13 +910,13 @@ def get_player_config(device_key: str, db: Session = Depends(get_db)):
         "server_time": datetime.utcnow().isoformat(),
     }
 
-@app.get("/api/player/{device_key}/playlist")
-def get_player_playlist(device_key: str, db: Session = Depends(get_db)):
+@app.get("/api/player/{access_code}/playlist")
+def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
     """Get current playlist for a player device based on current time and schedule"""
     device = db.query(Device).options(
         joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules).joinedload(Schedule.content_groups).joinedload(ContentGroup.content_items),
         joinedload(Device.content_groups).joinedload(ContentGroup.content_items)
-    ).filter(Device.device_key == device_key).first()
+    ).filter(Device.access_code == access_code).first()
     
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -908,14 +967,14 @@ def get_player_playlist(device_key: str, db: Session = Depends(get_db)):
 
 # ============== WebSocket ==============
 
-@app.websocket("/ws/{device_key}")
-async def websocket_endpoint(websocket: WebSocket, device_key: str, db: Session = Depends(get_db)):
-    device = db.query(Device).filter(Device.device_key == device_key).first()
+@app.websocket("/ws/{access_code}")
+async def websocket_endpoint(websocket: WebSocket, access_code: str, db: Session = Depends(get_db)):
+    device = db.query(Device).filter(Device.access_code == access_code).first()
     if not device:
         await websocket.close(code=4004)
         return
     
-    await manager.connect(websocket, device_key)
+    await manager.connect(websocket, access_code)
     
     # Update device status
     device.is_online = True
@@ -939,7 +998,7 @@ async def websocket_endpoint(websocket: WebSocket, device_key: str, db: Session 
                 pass
             
     except WebSocketDisconnect:
-        manager.disconnect(device_key)
+        manager.disconnect(access_code)
         device.is_online = False
         db.commit()
 

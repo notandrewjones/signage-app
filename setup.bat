@@ -6,6 +6,9 @@ echo   Digital Signage System - Setup
 echo ============================================
 echo.
 
+:: Get the directory where this script is located
+cd /d "%~dp0"
+
 :: Check if already set up
 if exist "python\python.exe" (
     echo Python already installed locally.
@@ -47,20 +50,29 @@ echo Lib\site-packages>> python\python312._pth
 echo Installing pip...
 python\python.exe python\get-pip.py --no-warn-script-location
 
+:: Install setuptools and wheel (required for building packages)
+echo Installing setuptools and wheel...
+python\python.exe -m pip install --upgrade pip setuptools wheel --no-warn-script-location
+
 :: Clean up
 del python312.zip
 del python\get-pip.py
 
 :install_deps
 echo.
-echo Installing dependencies...
+echo Installing server dependencies...
 python\python.exe -m pip install --no-warn-script-location -r server\requirements.txt
 
 if %errorlevel% neq 0 (
-    echo Failed to install dependencies.
+    echo Failed to install server dependencies.
     pause
     exit /b 1
 )
+
+:: Create upload directories
+if not exist "server\uploads\content" mkdir "server\uploads\content"
+if not exist "server\uploads\logos" mkdir "server\uploads\logos"
+if not exist "server\uploads\backgrounds" mkdir "server\uploads\backgrounds"
 
 echo.
 echo ============================================
@@ -69,5 +81,6 @@ echo ============================================
 echo.
 echo Run 'start-server.bat' to start the server
 echo Run 'start-ui.bat' to start the web interface
+echo Run 'player\run-player.bat' to start the player
 echo.
 pause

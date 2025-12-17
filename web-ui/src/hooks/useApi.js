@@ -208,8 +208,8 @@ export async function deleteDevice(id) {
   });
 }
 
-export async function regenerateDeviceKey(id) {
-  return apiFetch(`/devices/${id}/regenerate-key`, {
+export async function regenerateAccessCode(id) {
+  return apiFetch(`/devices/${id}/regenerate-code`, {
     method: 'POST',
   });
 }

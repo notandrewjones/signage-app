@@ -112,13 +112,14 @@ class Device(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
-    device_key = Column(String(64), nullable=False, unique=True)  # Unique identifier
+    access_code = Column(String(6), nullable=False, unique=True)  # 6-digit code
     description = Column(Text, nullable=True)
     location = Column(String(200), nullable=True)
     ip_address = Column(String(45), nullable=True)
     last_seen = Column(DateTime, nullable=True)
     is_online = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
+    is_registered = Column(Boolean, default=False)  # True once a player connects
     screen_width = Column(Integer, nullable=True)
     screen_height = Column(Integer, nullable=True)
     schedule_group_id = Column(Integer, ForeignKey('schedule_groups.id'), nullable=True)
