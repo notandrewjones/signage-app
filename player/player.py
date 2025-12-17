@@ -559,31 +559,36 @@ async function performTimeSync() {
     
     for (let i = 0; i < NUM_SAMPLES; i++) {
         try {
-            const t1 = performance.now();  // High-resolution local time
-            const localT1 = Date.now();    // Wall clock at send
+            // All times in SECONDS for consistency with server
+            const t1 = Date.now() / 1000;  // Local wall clock at send (seconds)
             
             const response = await fetch(serverUrl + '/api/time', {
                 method: 'GET',
                 cache: 'no-store'  // Prevent caching
             });
             
-            const t4 = performance.now();  // High-resolution local time at receive
+            const t4 = Date.now() / 1000;  // Local wall clock at receive (seconds)
             const data = await response.json();
-            const serverTime = data.time;  // Server timestamp
+            const t2 = data.time;  // Server timestamp (seconds)
             
-            // NTP-style calculation
-            const roundTrip = (t4 - t1) / 1000;  // Convert to seconds
-            const oneWayLatency = roundTrip / 2;
+            // Classic NTP calculation:
+            // t1 = local time when request sent
+            // t2 = server time when request received (≈ when server generated response)
+            // t3 = server time when response sent (same as t2 for us)
+            // t4 = local time when response received
+            // 
+            // offset = ((t2 - t1) + (t3 - t4)) / 2
+            // Since t2 = t3: offset = ((t2 - t1) + (t2 - t4)) / 2 = t2 - (t1 + t4) / 2
             
-            // Server time was captured at approximately t1 + oneWayLatency
-            // So offset = serverTime - (localT1/1000 + oneWayLatency)
-            const localTimeAtServerCapture = localT1 / 1000 + oneWayLatency;
-            const offset = serverTime - localTimeAtServerCapture;
+            const roundTrip = t4 - t1;
+            const offset = t2 - (t1 + t4) / 2;
             
             measurements.push({
                 offset: offset,
                 roundTrip: roundTrip,
-                latency: oneWayLatency
+                t1: t1,
+                t2: t2,
+                t4: t4
             });
             
             log(`Time sample ${i+1}: offset=${(offset*1000).toFixed(1)}ms, RTT=${(roundTrip*1000).toFixed(1)}ms`);
