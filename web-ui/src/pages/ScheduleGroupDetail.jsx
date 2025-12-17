@@ -165,6 +165,8 @@ export default function ScheduleGroupDetail() {
   const [description, setDescription] = useState('');
   const [color, setColor] = useState('#3B82F6');
   const [isActive, setIsActive] = useState(true);
+  const [transitionType, setTransitionType] = useState('cut');
+  const [transitionDuration, setTransitionDuration] = useState(0.5);
   
   const [activeTab, setActiveTab] = useState('content');
   const [saving, setSaving] = useState(false);
@@ -186,6 +188,8 @@ export default function ScheduleGroupDetail() {
       setDescription(group.description || '');
       setColor(group.color);
       setIsActive(group.is_active);
+      setTransitionType(group.transition_type || 'cut');
+      setTransitionDuration(group.transition_duration || 0.5);
       setInitialized(true);
     }
   }, [group, initialized]);
@@ -193,7 +197,14 @@ export default function ScheduleGroupDetail() {
   const handleSaveGroup = async () => {
     setSaving(true);
     try {
-      await updateScheduleGroup(id, { name, description, color, is_active: isActive });
+      await updateScheduleGroup(id, { 
+        name, 
+        description, 
+        color, 
+        is_active: isActive,
+        transition_type: transitionType,
+        transition_duration: transitionDuration,
+      });
       setToast({ message: 'Schedule group updated', type: 'success' });
       refetch();
     } catch (error) {
@@ -501,6 +512,68 @@ export default function ScheduleGroupDetail() {
             <div className="flex items-center gap-3">
               <input type="checkbox" id="groupActive" checked={isActive} onChange={e => setIsActive(e.target.checked)} />
               <label htmlFor="groupActive" className="text-sm">Group is active</label>
+            </div>
+            
+            {/* Transition Settings */}
+            <div className="pt-4 border-t border-surface-800">
+              <h3 className="font-medium mb-4">Transition Settings</h3>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-surface-300 mb-2">Transition Type</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setTransitionType('cut')}
+                      className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
+                        transitionType === 'cut'
+                          ? 'bg-accent text-white'
+                          : 'bg-surface-800 text-surface-400 hover:bg-surface-700'
+                      }`}
+                    >
+                      Hard Cut
+                    </button>
+                    <button
+                      onClick={() => setTransitionType('dissolve')}
+                      className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
+                        transitionType === 'dissolve'
+                          ? 'bg-accent text-white'
+                          : 'bg-surface-800 text-surface-400 hover:bg-surface-700'
+                      }`}
+                    >
+                      Dissolve
+                    </button>
+                  </div>
+                </div>
+                
+                {transitionType === 'dissolve' && (
+                  <div>
+                    <label className="block text-sm font-medium text-surface-300 mb-2">
+                      Transition Duration: {transitionDuration.toFixed(1)}s
+                    </label>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="3"
+                      step="0.1"
+                      value={transitionDuration}
+                      onChange={e => setTransitionDuration(parseFloat(e.target.value))}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-xs text-surface-500 mt-1">
+                      <span>0.1s</span>
+                      <span>1.5s</span>
+                      <span>3s</span>
+                    </div>
+                  </div>
+                )}
+                
+                <p className="text-sm text-surface-500">
+                  {transitionType === 'cut' 
+                    ? 'Content will switch instantly with no transition effect.'
+                    : `Content will crossfade over ${transitionDuration.toFixed(1)} seconds.`
+                  }
+                </p>
+              </div>
             </div>
             
             <div className="pt-4 border-t border-surface-800">

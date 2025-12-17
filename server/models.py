@@ -30,6 +30,11 @@ class ScheduleGroup(Base):
     description = Column(Text, nullable=True)
     color = Column(String(7), default='#3B82F6')
     is_active = Column(Boolean, default=True)
+    
+    # Transition settings
+    transition_type = Column(String(20), default='cut')  # 'cut' or 'dissolve'
+    transition_duration = Column(Float, default=0.5)  # seconds (0.1 - 3.0)
+    
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     

@@ -126,12 +126,16 @@ class ScheduleGroupCreate(BaseModel):
     description: Optional[str] = None
     color: str = "#3B82F6"
     is_active: bool = True
+    transition_type: str = "cut"  # 'cut' or 'dissolve'
+    transition_duration: float = 0.5  # 0.1 - 3.0 seconds
 
 class ScheduleGroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     color: Optional[str] = None
     is_active: Optional[bool] = None
+    transition_type: Optional[str] = None
+    transition_duration: Optional[float] = None
 
 class ContentItemUpdate(BaseModel):
     name: Optional[str] = None
@@ -219,6 +223,8 @@ def serialize_schedule_group(group: ScheduleGroup) -> dict:
         "description": group.description,
         "color": group.color,
         "is_active": group.is_active,
+        "transition_type": group.transition_type or "cut",
+        "transition_duration": group.transition_duration or 0.5,
         "content_count": len(group.content_items) if group.content_items else 0,
         "schedule_count": len(group.schedules) if group.schedules else 0,
         "device_count": len(group.devices) if group.devices else 0,
@@ -947,9 +953,20 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
             #     if item.is_active:
             #         playlist.append(serialize_content_item(item))
     
+    # Get transition settings from schedule group
+    transition_type = "cut"
+    transition_duration = 0.5
+    if device.schedule_group:
+        transition_type = device.schedule_group.transition_type or "cut"
+        transition_duration = device.schedule_group.transition_duration or 0.5
+    
     return {
         "playlist": playlist,
         "active_schedule": serialize_schedule(active_schedule) if active_schedule else None,
+        "transition": {
+            "type": transition_type,
+            "duration": transition_duration,
+        },
         "device": {
             "orientation": device.orientation,
             "flip_horizontal": device.flip_horizontal,
