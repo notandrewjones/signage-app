@@ -12,41 +12,35 @@ from sqlalchemy.sql import func
 
 Base = declarative_base()
 
-# Association tables for many-to-many relationships
-device_content_groups = Table(
-    'device_content_groups',
+# Association table for device to schedule group (many-to-many if needed in future)
+device_schedule_groups = Table(
+    'device_schedule_groups',
     Base.metadata,
     Column('device_id', Integer, ForeignKey('devices.id'), primary_key=True),
-    Column('content_group_id', Integer, ForeignKey('content_groups.id'), primary_key=True)
-)
-
-schedule_content_groups = Table(
-    'schedule_content_groups',
-    Base.metadata,
-    Column('schedule_id', Integer, ForeignKey('schedules.id'), primary_key=True),
-    Column('content_group_id', Integer, ForeignKey('content_groups.id'), primary_key=True)
+    Column('schedule_group_id', Integer, ForeignKey('schedule_groups.id'), primary_key=True)
 )
 
 
-class ContentGroup(Base):
-    """Groups of content (e.g., 'Gym Content', 'Check-in Content')"""
-    __tablename__ = 'content_groups'
+class ScheduleGroup(Base):
+    """Groups of content with scheduling (e.g., 'Morning Rotation', 'Weekend Schedule')"""
+    __tablename__ = 'schedule_groups'
     
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
     description = Column(Text, nullable=True)
-    color = Column(String(7), default='#3B82F6')  # Hex color for UI
+    color = Column(String(7), default='#3B82F6')
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
     # Relationships
-    content_items = relationship('ContentItem', back_populates='group', cascade='all, delete-orphan')
-    devices = relationship('Device', secondary=device_content_groups, back_populates='content_groups')
-    schedules = relationship('Schedule', secondary=schedule_content_groups, back_populates='content_groups')
+    schedules = relationship('Schedule', back_populates='schedule_group', cascade='all, delete-orphan')
+    content_items = relationship('ContentItem', back_populates='schedule_group', cascade='all, delete-orphan')
+    devices = relationship('Device', back_populates='schedule_group')
 
 
 class ContentItem(Base):
-    """Individual content items (videos, images)"""
+    """Individual content items (videos, images) - now directly in schedule groups"""
     __tablename__ = 'content_items'
     
     id = Column(Integer, primary_key=True)
@@ -61,33 +55,16 @@ class ContentItem(Base):
     height = Column(Integer, nullable=True)
     order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
-    group_id = Column(Integer, ForeignKey('content_groups.id'), nullable=False)
+    schedule_group_id = Column(Integer, ForeignKey('schedule_groups.id'), nullable=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
     # Relationships
-    group = relationship('ContentGroup', back_populates='content_items')
-
-
-class ScheduleGroup(Base):
-    """Groups of schedules (e.g., 'Morning Rotation', 'Weekend Schedule')"""
-    __tablename__ = 'schedule_groups'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False, unique=True)
-    description = Column(Text, nullable=True)
-    color = Column(String(7), default='#10B981')
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    schedules = relationship('Schedule', back_populates='schedule_group', cascade='all, delete-orphan')
-    devices = relationship('Device', back_populates='schedule_group')
+    schedule_group = relationship('ScheduleGroup', back_populates='content_items')
 
 
 class Schedule(Base):
-    """Individual schedule entries"""
+    """Individual schedule entries - defines when content plays"""
     __tablename__ = 'schedules'
     
     id = Column(Integer, primary_key=True)
@@ -103,7 +80,6 @@ class Schedule(Base):
     
     # Relationships
     schedule_group = relationship('ScheduleGroup', back_populates='schedules')
-    content_groups = relationship('ContentGroup', secondary=schedule_content_groups, back_populates='schedules')
 
 
 class Device(Base):
@@ -122,25 +98,31 @@ class Device(Base):
     is_registered = Column(Boolean, default=False)  # True once a player connects
     screen_width = Column(Integer, nullable=True)
     screen_height = Column(Integer, nullable=True)
+    
+    # Orientation settings
+    orientation = Column(String(20), default='landscape')  # 'landscape' or 'portrait'
+    flip_horizontal = Column(Boolean, default=False)
+    flip_vertical = Column(Boolean, default=False)
+    
     schedule_group_id = Column(Integer, ForeignKey('schedule_groups.id'), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
     # Relationships
     schedule_group = relationship('ScheduleGroup', back_populates='devices')
-    content_groups = relationship('ContentGroup', secondary=device_content_groups, back_populates='devices')
 
 
 class DefaultDisplay(Base):
-    """Default display settings (logo, backgrounds) when no content is scheduled"""
+    """Splash screen settings - shown when no content is scheduled"""
     __tablename__ = 'default_display'
     
     id = Column(Integer, primary_key=True)
     logo_filename = Column(String(500), nullable=True)
     logo_scale = Column(Float, default=0.5)  # 0.1 to 1.0
     logo_position = Column(String(20), default='center')  # center, top, bottom
-    background_mode = Column(String(20), default='solid')  # solid, image, slideshow
+    background_mode = Column(String(20), default='solid')  # solid, image, slideshow, video
     background_color = Column(String(7), default='#000000')
+    background_video_filename = Column(String(500), nullable=True)  # For video background
     slideshow_duration = Column(Float, default=30.0)  # seconds per background
     slideshow_transition = Column(String(20), default='fade')  # fade, slide, none
     created_at = Column(DateTime, default=func.now())
@@ -151,7 +133,7 @@ class DefaultDisplay(Base):
 
 
 class BackgroundImage(Base):
-    """Background images for the default display"""
+    """Background images for the splash screen"""
     __tablename__ = 'background_images'
     
     id = Column(Integer, primary_key=True)

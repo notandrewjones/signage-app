@@ -1,8 +1,131 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, AlertCircle, Check, Loader2, ChevronDown } from 'lucide-react';
+import { X, Upload, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
 
-// Modal Component
+// Page Header
+export function PageHeader({ title, description, actions }) {
+  return (
+    <div className="flex items-start justify-between mb-8">
+      <div>
+        <h1 className="text-2xl font-bold mb-1">{title}</h1>
+        {description && <p className="text-surface-400">{description}</p>}
+      </div>
+      {actions && <div className="flex items-center gap-3">{actions}</div>}
+    </div>
+  );
+}
+
+// Loading State
+export function LoadingState({ message = 'Loading...' }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <Loader2 className="w-8 h-8 text-accent animate-spin mb-4" />
+      <p className="text-surface-400">{message}</p>
+    </div>
+  );
+}
+
+// Empty State
+export function EmptyState({ icon: Icon, title, description, action }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      {Icon && (
+        <div className="p-4 bg-surface-800 rounded-2xl mb-4">
+          <Icon className="w-8 h-8 text-surface-500" />
+        </div>
+      )}
+      <h3 className="text-lg font-semibold mb-2">{title}</h3>
+      <p className="text-surface-400 mb-6 max-w-md">{description}</p>
+      {action}
+    </div>
+  );
+}
+
+// Stat Card
+export function StatCard({ icon: Icon, label, value, color = 'accent' }) {
+  const colorClasses = {
+    accent: 'bg-accent/10 text-accent',
+    green: 'bg-green-500/10 text-green-400',
+    blue: 'bg-blue-500/10 text-blue-400',
+    purple: 'bg-purple-500/10 text-purple-400',
+    yellow: 'bg-yellow-500/10 text-yellow-400',
+  };
+  
+  return (
+    <div className="card p-6">
+      <div className="flex items-center gap-4">
+        <div className={`p-3 rounded-xl ${colorClasses[color]}`}>
+          <Icon className="w-6 h-6" />
+        </div>
+        <div>
+          <p className="text-2xl font-bold">{value}</p>
+          <p className="text-sm text-surface-400">{label}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Badge
+export function Badge({ children, color = 'gray' }) {
+  const colorClasses = {
+    gray: 'bg-surface-700 text-surface-300',
+    green: 'bg-green-500/20 text-green-400',
+    blue: 'bg-blue-500/20 text-blue-400',
+    purple: 'bg-purple-500/20 text-purple-400',
+    yellow: 'bg-yellow-500/20 text-yellow-400',
+    red: 'bg-red-500/20 text-red-400',
+  };
+  
+  return (
+    <span className={`inline-flex items-center px-2 py-1 rounded-md text-xs font-medium ${colorClasses[color]}`}>
+      {children}
+    </span>
+  );
+}
+
+// Status Indicator
+export function StatusIndicator({ online, showLabel = false }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`w-2 h-2 rounded-full ${online ? 'bg-green-500' : 'bg-surface-600'}`} />
+      {showLabel && (
+        <span className={`text-sm ${online ? 'text-green-400' : 'text-surface-500'}`}>
+          {online ? 'Online' : 'Offline'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Color Dot
+export function ColorDot({ color, size = 'md' }) {
+  const sizeClasses = {
+    sm: 'w-3 h-3',
+    md: 'w-4 h-4',
+    lg: 'w-5 h-5',
+  };
+  
+  return (
+    <span 
+      className={`${sizeClasses[size]} rounded-full flex-shrink-0`}
+      style={{ backgroundColor: color }}
+    />
+  );
+}
+
+// Modal
 export function Modal({ isOpen, onClose, title, children, size = 'md' }) {
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isOpen]);
+  
   if (!isOpen) return null;
   
   const sizeClasses = {
@@ -13,23 +136,16 @@ export function Modal({ isOpen, onClose, title, children, size = 'md' }) {
   };
   
   return (
-    <div className="modal-backdrop flex items-center justify-center p-4" onClick={onClose}>
-      <div 
-        className={`card ${sizeClasses[size]} w-full animate-in`}
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-800">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+      <div className={`relative bg-surface-900 border border-surface-700 rounded-2xl w-full ${sizeClasses[size]} max-h-[90vh] overflow-auto`}>
+        <div className="flex items-center justify-between p-6 border-b border-surface-800">
           <h2 className="text-lg font-semibold">{title}</h2>
-          <button 
-            onClick={onClose}
-            className="btn-ghost p-2 rounded-lg"
-          >
+          <button onClick={onClose} className="p-2 hover:bg-surface-800 rounded-lg transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="p-6">
-          {children}
-        </div>
+        <div className="p-6">{children}</div>
       </div>
     </div>
   );
@@ -40,283 +156,150 @@ export function ConfirmDialog({ isOpen, onClose, onConfirm, title, message, conf
   if (!isOpen) return null;
   
   return (
-    <div className="modal-backdrop flex items-center justify-center p-4" onClick={onClose}>
-      <div 
-        className="card max-w-md w-full animate-in"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="p-6">
-          <div className="flex items-start gap-4">
-            <div className={`p-2 rounded-full ${danger ? 'bg-red-500/10' : 'bg-amber-500/10'}`}>
-              <AlertCircle className={`w-6 h-6 ${danger ? 'text-red-400' : 'text-amber-400'}`} />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-lg font-semibold mb-2">{title}</h3>
-              <p className="text-surface-400">{message}</p>
-            </div>
-          </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button onClick={onClose} className="btn btn-secondary">
-              Cancel
-            </button>
-            <button 
-              onClick={() => { onConfirm(); onClose(); }}
-              className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-            >
-              {confirmText}
-            </button>
-          </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+      <div className="relative bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md p-6">
+        <h2 className="text-lg font-semibold mb-2">{title}</h2>
+        <p className="text-surface-400 mb-6">{message}</p>
+        <div className="flex justify-end gap-3">
+          <button onClick={onClose} className="btn btn-secondary">Cancel</button>
+          <button onClick={() => { onConfirm(); onClose(); }} className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}>
+            {confirmText}
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// Toast Notifications
-export function Toast({ message, type = 'info', onClose }) {
+// Toast
+export function Toast({ message, type = 'info', onClose, duration = 4000 }) {
   useEffect(() => {
-    const timer = setTimeout(onClose, 4000);
+    const timer = setTimeout(onClose, duration);
     return () => clearTimeout(timer);
-  }, [onClose]);
+  }, [onClose, duration]);
+  
+  const typeClasses = {
+    success: 'bg-green-500/20 border-green-500/30 text-green-400',
+    error: 'bg-red-500/20 border-red-500/30 text-red-400',
+    info: 'bg-blue-500/20 border-blue-500/30 text-blue-400',
+  };
   
   const icons = {
-    success: <Check className="w-5 h-5 text-green-400" />,
-    error: <AlertCircle className="w-5 h-5 text-red-400" />,
-    info: <AlertCircle className="w-5 h-5 text-blue-400" />,
+    success: CheckCircle,
+    error: AlertCircle,
+    info: AlertCircle,
   };
   
-  const bgColors = {
-    success: 'bg-green-500/10 border-green-500/20',
-    error: 'bg-red-500/10 border-red-500/20',
-    info: 'bg-blue-500/10 border-blue-500/20',
-  };
+  const Icon = icons[type];
   
   return (
-    <div className={`fixed bottom-4 right-4 flex items-center gap-3 px-4 py-3 rounded-lg border ${bgColors[type]} animate-in z-50`}>
-      {icons[type]}
-      <span className="text-sm">{message}</span>
-      <button onClick={onClose} className="text-surface-400 hover:text-surface-200">
-        <X className="w-4 h-4" />
-      </button>
-    </div>
-  );
-}
-
-// Loading Spinner
-export function Spinner({ size = 'md', className = '' }) {
-  const sizes = {
-    sm: 'w-4 h-4',
-    md: 'w-6 h-6',
-    lg: 'w-8 h-8',
-  };
-  
-  return (
-    <Loader2 className={`animate-spin ${sizes[size]} ${className}`} />
-  );
-}
-
-// Loading State
-export function LoadingState({ message = 'Loading...' }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-12">
-      <Spinner size="lg" className="text-accent mb-4" />
-      <p className="text-surface-400">{message}</p>
-    </div>
-  );
-}
-
-// Empty State
-export function EmptyState({ icon: Icon, title, description, action }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-      <div className="p-4 bg-surface-800 rounded-full mb-4">
-        <Icon className="w-8 h-8 text-surface-400" />
+    <div className="fixed bottom-4 right-4 z-50">
+      <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${typeClasses[type]}`}>
+        <Icon className="w-5 h-5" />
+        <span>{message}</span>
+        <button onClick={onClose} className="p-1 hover:bg-white/10 rounded">
+          <X className="w-4 h-4" />
+        </button>
       </div>
-      <h3 className="text-lg font-medium mb-2">{title}</h3>
-      <p className="text-surface-400 mb-6 max-w-md">{description}</p>
-      {action}
     </div>
   );
 }
 
-// File Upload Zone
-export function UploadZone({ onFilesSelected, accept, multiple = true, children }) {
-  const [isDragging, setIsDragging] = useState(false);
+// Select
+export function Select({ value, onChange, options, placeholder }) {
+  return (
+    <select 
+      value={value} 
+      onChange={e => onChange(e.target.value)}
+      className="input"
+    >
+      {placeholder && <option value="">{placeholder}</option>}
+      {options.map(opt => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+    </select>
+  );
+}
+
+// Upload Zone
+export function UploadZone({ onFilesSelected, uploading = false, accept = '*', maxFiles = 10, compact = false }) {
+  const [dragActive, setDragActive] = useState(false);
   const inputRef = useRef(null);
   
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
-  };
-  
-  const handleDragIn = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-  
-  const handleDragOut = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setDragActive(false);
+    }
   };
   
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsDragging(false);
+    setDragActive(false);
     
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      onFilesSelected(multiple ? files : [files[0]]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files).slice(0, maxFiles);
+      onFilesSelected(files);
     }
   };
   
-  const handleFileSelect = (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length > 0) {
-      onFilesSelected(multiple ? files : [files[0]]);
+  const handleChange = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files).slice(0, maxFiles);
+      onFilesSelected(files);
     }
-    e.target.value = '';
   };
   
   return (
     <div
-      className={`upload-zone ${isDragging ? 'drag-over' : ''}`}
-      onDragEnter={handleDragIn}
-      onDragLeave={handleDragOut}
+      onDragEnter={handleDrag}
+      onDragLeave={handleDrag}
       onDragOver={handleDrag}
       onDrop={handleDrop}
       onClick={() => inputRef.current?.click()}
+      className={`
+        border-2 border-dashed rounded-xl cursor-pointer transition-all
+        ${compact ? 'p-4' : 'p-8'}
+        ${dragActive 
+          ? 'border-accent bg-accent/10' 
+          : 'border-surface-700 hover:border-surface-500 bg-surface-800/50'
+        }
+        ${uploading ? 'opacity-50 pointer-events-none' : ''}
+      `}
     >
       <input
         ref={inputRef}
         type="file"
         accept={accept}
-        multiple={multiple}
-        onChange={handleFileSelect}
+        multiple={maxFiles > 1}
+        onChange={handleChange}
         className="hidden"
       />
-      {children}
-    </div>
-  );
-}
-
-// Badge
-export function Badge({ children, color = 'gray', className = '' }) {
-  const colors = {
-    gray: 'bg-surface-700 text-surface-300',
-    green: 'bg-green-500/10 text-green-400 border border-green-500/20',
-    red: 'bg-red-500/10 text-red-400 border border-red-500/20',
-    blue: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
-    yellow: 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20',
-    purple: 'bg-purple-500/10 text-purple-400 border border-purple-500/20',
-  };
-  
-  return (
-    <span className={`badge ${colors[color]} ${className}`}>
-      {children}
-    </span>
-  );
-}
-
-// Tabs
-export function Tabs({ tabs, activeTab, onChange }) {
-  return (
-    <div className="flex gap-1 p-1 bg-surface-800 rounded-lg">
-      {tabs.map(tab => (
-        <button
-          key={tab.id}
-          onClick={() => onChange(tab.id)}
-          className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-            activeTab === tab.id
-              ? 'bg-surface-700 text-white'
-              : 'text-surface-400 hover:text-white hover:bg-surface-700/50'
-          }`}
-        >
-          {tab.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// Select Dropdown
-export function Select({ value, onChange, options, placeholder = 'Select...', className = '' }) {
-  return (
-    <div className="relative">
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        className={`select pr-10 ${className}`}
-      >
-        {placeholder && <option value="">{placeholder}</option>}
-        {options.map(opt => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-surface-400 pointer-events-none" />
-    </div>
-  );
-}
-
-// Color Dot
-export function ColorDot({ color, size = 'md' }) {
-  const sizes = {
-    sm: 'w-2 h-2',
-    md: 'w-3 h-3',
-    lg: 'w-4 h-4',
-  };
-  
-  return (
-    <span 
-      className={`${sizes[size]} rounded-full inline-block`}
-      style={{ backgroundColor: color }}
-    />
-  );
-}
-
-// Status Indicator
-export function StatusIndicator({ online }) {
-  return (
-    <span className={`status-dot ${online ? 'status-online' : 'status-offline'}`} />
-  );
-}
-
-// Page Header
-export function PageHeader({ title, description, actions }) {
-  return (
-    <div className="flex items-center justify-between mb-8">
-      <div>
-        <h1 className="text-2xl font-bold mb-1">{title}</h1>
-        {description && <p className="text-surface-400">{description}</p>}
-      </div>
-      {actions && <div className="flex items-center gap-3">{actions}</div>}
-    </div>
-  );
-}
-
-// Stat Card
-export function StatCard({ icon: Icon, label, value, color = 'accent' }) {
-  const colorClasses = {
-    accent: 'text-accent bg-accent/10',
-    green: 'text-green-400 bg-green-500/10',
-    blue: 'text-blue-400 bg-blue-500/10',
-    purple: 'text-purple-400 bg-purple-500/10',
-  };
-  
-  return (
-    <div className="card p-5">
-      <div className="flex items-center gap-4">
-        <div className={`p-3 rounded-xl ${colorClasses[color]}`}>
-          <Icon className="w-6 h-6" />
-        </div>
-        <div>
-          <p className="text-2xl font-bold">{value}</p>
-          <p className="text-sm text-surface-400">{label}</p>
-        </div>
+      
+      <div className="flex flex-col items-center text-center">
+        {uploading ? (
+          <>
+            <Loader2 className={`${compact ? 'w-6 h-6' : 'w-10 h-10'} text-accent animate-spin mb-2`} />
+            <p className="text-surface-400">Uploading...</p>
+          </>
+        ) : (
+          <>
+            <Upload className={`${compact ? 'w-6 h-6' : 'w-10 h-10'} text-surface-500 mb-2`} />
+            <p className={`text-surface-300 ${compact ? 'text-sm' : ''}`}>
+              Drop files here or click to upload
+            </p>
+            {!compact && (
+              <p className="text-sm text-surface-500 mt-1">
+                Supports images and videos
+              </p>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

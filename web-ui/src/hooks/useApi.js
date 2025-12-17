@@ -72,64 +72,7 @@ export function useStats() {
   return useApi('/stats');
 }
 
-// Content Groups
-export function useContentGroups() {
-  return useApi('/content-groups');
-}
-
-export function useContentGroup(id) {
-  return useApi(`/content-groups/${id}`, [id]);
-}
-
-export async function createContentGroup(data) {
-  return apiFetch('/content-groups', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-}
-
-export async function updateContentGroup(id, data) {
-  return apiFetch(`/content-groups/${id}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteContentGroup(id) {
-  return apiFetch(`/content-groups/${id}`, {
-    method: 'DELETE',
-  });
-}
-
-// Content Items
-export async function uploadContent(groupId, file, name, displayDuration = 10) {
-  return uploadFile(`/content-groups/${groupId}/content`, file, {
-    name,
-    display_duration: displayDuration,
-  });
-}
-
-export async function updateContentItem(id, data) {
-  return apiFetch(`/content/${id}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteContentItem(id) {
-  return apiFetch(`/content/${id}`, {
-    method: 'DELETE',
-  });
-}
-
-export async function reorderContent(groupId, itemIds) {
-  return apiFetch(`/content-groups/${groupId}/reorder`, {
-    method: 'POST',
-    body: JSON.stringify(itemIds),
-  });
-}
-
-// Schedule Groups
+// Schedule Groups (now includes content)
 export function useScheduleGroups() {
   return useApi('/schedule-groups');
 }
@@ -155,6 +98,34 @@ export async function updateScheduleGroup(id, data) {
 export async function deleteScheduleGroup(id) {
   return apiFetch(`/schedule-groups/${id}`, {
     method: 'DELETE',
+  });
+}
+
+// Content Items (now part of schedule groups)
+export async function uploadContent(groupId, file, name, displayDuration = 10) {
+  return uploadFile(`/schedule-groups/${groupId}/content`, file, {
+    name,
+    display_duration: displayDuration,
+  });
+}
+
+export async function updateContentItem(id, data) {
+  return apiFetch(`/content/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteContentItem(id) {
+  return apiFetch(`/content/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function reorderContent(groupId, itemIds) {
+  return apiFetch(`/schedule-groups/${groupId}/reorder`, {
+    method: 'POST',
+    body: JSON.stringify(itemIds),
   });
 }
 
@@ -214,12 +185,12 @@ export async function regenerateAccessCode(id) {
   });
 }
 
-// Default Display
-export function useDefaultDisplay() {
+// Splash Screen (Default Display)
+export function useSplashScreen() {
   return useApi('/default-display');
 }
 
-export async function updateDefaultDisplay(data) {
+export async function updateSplashScreen(data) {
   return apiFetch('/default-display', {
     method: 'PATCH',
     body: JSON.stringify(data),
@@ -242,6 +213,16 @@ export async function uploadBackground(file) {
 
 export async function deleteBackground(id) {
   return apiFetch(`/default-display/backgrounds/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function uploadBackgroundVideo(file) {
+  return uploadFile('/default-display/background-video', file);
+}
+
+export async function deleteBackgroundVideo() {
+  return apiFetch('/default-display/background-video', {
     method: 'DELETE',
   });
 }

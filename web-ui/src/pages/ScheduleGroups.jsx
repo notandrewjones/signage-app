@@ -1,35 +1,37 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Calendar, MoreVertical, Trash2, Edit, Clock, Tv } from 'lucide-react';
-import { useScheduleGroups, createScheduleGroup, deleteScheduleGroup } from '../hooks/useApi';
-import { PageHeader, LoadingState, EmptyState, Modal, ConfirmDialog, Toast, ColorDot, Badge } from '../components/ui';
+import { Link } from 'react-router-dom';
+import { Plus, Calendar, Image, Tv } from 'lucide-react';
+import { useScheduleGroups, createScheduleGroup } from '../hooks/useApi';
+import { PageHeader, LoadingState, EmptyState, Modal, Toast, Badge, ColorDot } from '../components/ui';
 
 export default function ScheduleGroups() {
   const { data: groups, loading, refetch } = useScheduleGroups();
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newDescription, setNewDescription] = useState('');
+  const [newColor, setNewColor] = useState('#3B82F6');
+  const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState(null);
-  const navigate = useNavigate();
   
-  const handleCreate = async (data) => {
+  const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
+  
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    
+    setCreating(true);
     try {
-      const group = await createScheduleGroup(data);
-      setShowCreateModal(false);
+      await createScheduleGroup({ name: newName, description: newDescription, color: newColor });
+      setShowCreate(false);
+      setNewName('');
+      setNewDescription('');
+      setNewColor('#3B82F6');
       setToast({ message: 'Schedule group created', type: 'success' });
       refetch();
-      navigate(`/schedules/${group.id}`);
     } catch (error) {
       setToast({ message: error.message, type: 'error' });
-    }
-  };
-  
-  const handleDelete = async (id) => {
-    try {
-      await deleteScheduleGroup(id);
-      setToast({ message: 'Schedule group deleted', type: 'success' });
-      refetch();
-    } catch (error) {
-      setToast({ message: error.message, type: 'error' });
+    } finally {
+      setCreating(false);
     }
   };
   
@@ -40,234 +42,136 @@ export default function ScheduleGroups() {
   return (
     <div>
       <PageHeader 
-        title="Schedules" 
-        description="Control when content plays on your devices"
+        title="Schedule Groups"
+        description="Organize content and control when it plays"
         actions={
-          <button 
-            onClick={() => setShowCreateModal(true)}
-            className="btn btn-primary"
-          >
-            <Plus className="w-5 h-5" />
-            New Schedule Group
+          <button onClick={() => setShowCreate(true)} className="btn btn-primary">
+            <Plus className="w-4 h-4" />
+            Create Group
           </button>
         }
       />
       
       {groups?.length === 0 ? (
-        <EmptyState
+        <EmptyState 
           icon={Calendar}
-          title="No schedule groups"
-          description="Create schedule groups to control when content plays"
+          title="No schedule groups yet"
+          description="Create a schedule group to organize content and control playback times"
           action={
-            <button 
-              onClick={() => setShowCreateModal(true)}
-              className="btn btn-primary"
-            >
-              <Plus className="w-5 h-5" />
-              New Schedule Group
+            <button onClick={() => setShowCreate(true)} className="btn btn-primary">
+              <Plus className="w-4 h-4" />
+              Create Group
             </button>
           }
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {groups.map(group => (
-            <ScheduleGroupCard 
+          {groups?.map(group => (
+            <Link 
               key={group.id} 
-              group={group} 
-              onDelete={() => setDeleteConfirm(group)}
-            />
-          ))}
-        </div>
-      )}
-      
-      <CreateScheduleGroupModal 
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onCreate={handleCreate}
-      />
-      
-      <ConfirmDialog
-        isOpen={!!deleteConfirm}
-        onClose={() => setDeleteConfirm(null)}
-        onConfirm={() => handleDelete(deleteConfirm.id)}
-        title="Delete Schedule Group"
-        message={`Are you sure you want to delete "${deleteConfirm?.name}"? All schedules in this group will be deleted.`}
-        confirmText="Delete"
-        danger
-      />
-      
-      {toast && (
-        <Toast 
-          message={toast.message} 
-          type={toast.type} 
-          onClose={() => setToast(null)} 
-        />
-      )}
-    </div>
-  );
-}
-
-function ScheduleGroupCard({ group, onDelete }) {
-  const [showMenu, setShowMenu] = useState(false);
-  
-  return (
-    <div className="card-hover relative">
-      <Link to={`/schedules/${group.id}`} className="block p-5">
-        <div className="flex items-start justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div 
-              className="p-3 rounded-xl"
-              style={{ backgroundColor: `${group.color}20` }}
+              to={`/schedules/${group.id}`}
+              className="card p-6 hover:border-surface-600 transition-all group"
             >
-              <Calendar className="w-6 h-6" style={{ color: group.color }} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-semibold">{group.name}</h3>
+              <div className="flex items-start justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <ColorDot color={group.color} size="lg" />
+                  <div>
+                    <h3 className="font-semibold text-lg">{group.name}</h3>
+                    {group.description && (
+                      <p className="text-sm text-surface-500 line-clamp-1">{group.description}</p>
+                    )}
+                  </div>
+                </div>
                 {group.is_active ? (
                   <Badge color="green">Active</Badge>
                 ) : (
                   <Badge color="gray">Inactive</Badge>
                 )}
               </div>
-              {group.description && (
-                <p className="text-sm text-surface-500 line-clamp-1">
-                  {group.description}
-                </p>
-              )}
-            </div>
-          </div>
+              
+              <div className="grid grid-cols-3 gap-4 pt-4 border-t border-surface-800">
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-1 text-surface-500 mb-1">
+                    <Image className="w-4 h-4" />
+                  </div>
+                  <p className="text-lg font-semibold">{group.content_count}</p>
+                  <p className="text-xs text-surface-500">Content</p>
+                </div>
+                
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-1 text-surface-500 mb-1">
+                    <Calendar className="w-4 h-4" />
+                  </div>
+                  <p className="text-lg font-semibold">{group.schedule_count}</p>
+                  <p className="text-xs text-surface-500">Schedules</p>
+                </div>
+                
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-1 text-surface-500 mb-1">
+                    <Tv className="w-4 h-4" />
+                  </div>
+                  <p className="text-lg font-semibold">{group.device_count}</p>
+                  <p className="text-xs text-surface-500">Devices</p>
+                </div>
+              </div>
+            </Link>
+          ))}
         </div>
-        
-        <div className="flex items-center gap-6 text-sm">
-          <div className="flex items-center gap-2 text-surface-400">
-            <Clock className="w-4 h-4" />
-            <span>{group.schedule_count} schedule{group.schedule_count !== 1 ? 's' : ''}</span>
-          </div>
-          <div className="flex items-center gap-2 text-surface-400">
-            <Tv className="w-4 h-4" />
-            <span>{group.device_count} device{group.device_count !== 1 ? 's' : ''}</span>
-          </div>
-        </div>
-      </Link>
+      )}
       
-      <div className="absolute top-4 right-4">
-        <button 
-          onClick={(e) => { e.preventDefault(); setShowMenu(!showMenu); }}
-          className="btn-ghost p-2 rounded-lg"
-        >
-          <MoreVertical className="w-4 h-4" />
-        </button>
-        
-        {showMenu && (
-          <>
-            <div 
-              className="fixed inset-0 z-10" 
-              onClick={() => setShowMenu(false)} 
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Schedule Group">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-surface-300 mb-2">Name *</label>
+            <input 
+              type="text" 
+              value={newName} 
+              onChange={e => setNewName(e.target.value)}
+              placeholder="e.g., Morning Announcements"
+              className="input"
+              autoFocus
             />
-            <div className="absolute right-0 top-full mt-1 w-40 bg-surface-800 border border-surface-700 rounded-lg shadow-xl z-20 py-1">
-              <Link 
-                to={`/schedules/${group.id}`}
-                className="flex items-center gap-2 px-4 py-2 text-sm hover:bg-surface-700 transition-colors"
-              >
-                <Edit className="w-4 h-4" />
-                Edit
-              </Link>
-              <button 
-                onClick={(e) => { e.preventDefault(); setShowMenu(false); onDelete(); }}
-                className="flex items-center gap-2 px-4 py-2 text-sm text-red-400 hover:bg-surface-700 transition-colors w-full"
-              >
-                <Trash2 className="w-4 h-4" />
-                Delete
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CreateScheduleGroupModal({ isOpen, onClose, onCreate }) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [color, setColor] = useState('#10B981');
-  const [loading, setLoading] = useState(false);
-  
-  const colors = [
-    '#10B981', '#3B82F6', '#F59E0B', '#EF4444', 
-    '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'
-  ];
-  
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    
-    setLoading(true);
-    await onCreate({ name, description, color });
-    setLoading(false);
-    setName('');
-    setDescription('');
-    setColor('#10B981');
-  };
-  
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Create Schedule Group">
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-surface-300 mb-2">
-            Group Name *
-          </label>
-          <input
-            type="text"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="e.g., Business Hours"
-            className="input"
-            required
-          />
-        </div>
-        
-        <div>
-          <label className="block text-sm font-medium text-surface-300 mb-2">
-            Description
-          </label>
-          <textarea
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description"
-            className="input min-h-[80px]"
-          />
-        </div>
-        
-        <div>
-          <label className="block text-sm font-medium text-surface-300 mb-2">
-            Color
-          </label>
-          <div className="flex items-center gap-2">
-            {colors.map(c => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setColor(c)}
-                className={`w-8 h-8 rounded-lg transition-all ${
-                  color === c ? 'ring-2 ring-offset-2 ring-offset-surface-900 ring-white scale-110' : ''
-                }`}
-                style={{ backgroundColor: c }}
-              />
-            ))}
           </div>
-        </div>
-        
-        <div className="flex justify-end gap-3 pt-4">
-          <button type="button" onClick={onClose} className="btn btn-secondary">
-            Cancel
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={loading || !name.trim()}>
-            {loading ? 'Creating...' : 'Create'}
-          </button>
-        </div>
-      </form>
-    </Modal>
+          
+          <div>
+            <label className="block text-sm font-medium text-surface-300 mb-2">Description</label>
+            <textarea 
+              value={newDescription} 
+              onChange={e => setNewDescription(e.target.value)}
+              placeholder="Optional description"
+              className="input min-h-[80px]"
+            />
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-surface-300 mb-2">Color</label>
+            <div className="flex gap-2">
+              {colors.map(c => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setNewColor(c)}
+                  className={`w-8 h-8 rounded-full transition-transform ${
+                    newColor === c ? 'ring-2 ring-white ring-offset-2 ring-offset-surface-900 scale-110' : ''
+                  }`}
+                  style={{ backgroundColor: c }}
+                />
+              ))}
+            </div>
+          </div>
+          
+          <div className="flex justify-end gap-3 pt-4 border-t border-surface-800">
+            <button type="button" onClick={() => setShowCreate(false)} className="btn btn-secondary">
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={creating || !newName.trim()}>
+              {creating ? 'Creating...' : 'Create Group'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+      
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
   );
 }

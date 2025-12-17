@@ -1,22 +1,23 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, Save, Trash2, RefreshCw, Copy, Check } from 'lucide-react';
-import { useDevice, useContentGroups, useScheduleGroups, updateDevice, deleteDevice, regenerateAccessCode } from '../hooks/useApi';
+import { ArrowLeft, Save, Trash2, RefreshCw, Copy, Check, Monitor, Smartphone, FlipHorizontal, FlipVertical } from 'lucide-react';
+import { useDevice, useScheduleGroups, updateDevice, deleteDevice, regenerateAccessCode } from '../hooks/useApi';
 import { PageHeader, LoadingState, ConfirmDialog, Toast, Select, Badge, ColorDot } from '../components/ui';
 
 export default function DeviceDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { data: device, loading, refetch } = useDevice(id);
-  const { data: contentGroups } = useContentGroups();
   const { data: scheduleGroups } = useScheduleGroups();
   
   const [name, setName] = useState('');
   const [location, setLocation] = useState('');
   const [description, setDescription] = useState('');
   const [scheduleGroupId, setScheduleGroupId] = useState('');
-  const [selectedContentGroups, setSelectedContentGroups] = useState([]);
   const [isActive, setIsActive] = useState(true);
+  const [orientation, setOrientation] = useState('landscape');
+  const [flipHorizontal, setFlipHorizontal] = useState(false);
+  const [flipVertical, setFlipVertical] = useState(false);
   
   const [saving, setSaving] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -31,8 +32,10 @@ export default function DeviceDetail() {
       setLocation(device.location || '');
       setDescription(device.description || '');
       setScheduleGroupId(device.schedule_group_id?.toString() || '');
-      setSelectedContentGroups(device.content_groups?.map(g => g.id) || []);
       setIsActive(device.is_active);
+      setOrientation(device.orientation || 'landscape');
+      setFlipHorizontal(device.flip_horizontal || false);
+      setFlipVertical(device.flip_vertical || false);
       setInitialized(true);
     }
   }, [device, initialized]);
@@ -45,8 +48,10 @@ export default function DeviceDetail() {
         location,
         description,
         is_active: isActive,
+        orientation,
+        flip_horizontal: flipHorizontal,
+        flip_vertical: flipVertical,
         schedule_group_id: scheduleGroupId ? parseInt(scheduleGroupId) : null,
-        content_group_ids: selectedContentGroups,
       });
       setToast({ message: 'Device updated successfully', type: 'success' });
       refetch();
@@ -80,14 +85,6 @@ export default function DeviceDetail() {
     navigator.clipboard.writeText(device.access_code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
-  
-  const toggleContentGroup = (groupId) => {
-    setSelectedContentGroups(prev => 
-      prev.includes(groupId) 
-        ? prev.filter(id => id !== groupId)
-        : [...prev, groupId]
-    );
   };
   
   if (loading || !device) {
@@ -184,40 +181,139 @@ export default function DeviceDetail() {
             </div>
           </div>
           
+          {/* Display Orientation Settings */}
+          <div className="card p-6">
+            <h2 className="section-title">Display Orientation</h2>
+            <p className="text-sm text-surface-400 mb-6">Configure how content is displayed on this device</p>
+            
+            {/* Orientation Toggle */}
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-surface-300 mb-3">Screen Orientation</label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setOrientation('landscape')}
+                  className={`flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-all ${
+                    orientation === 'landscape' 
+                      ? 'border-accent bg-accent/10' 
+                      : 'border-surface-700 hover:border-surface-600'
+                  }`}
+                >
+                  <div className={`w-20 h-12 rounded-lg border-2 flex items-center justify-center ${
+                    orientation === 'landscape' ? 'border-accent bg-accent/20' : 'border-surface-600 bg-surface-800'
+                  }`}>
+                    <Monitor className={`w-6 h-6 ${orientation === 'landscape' ? 'text-accent' : 'text-surface-500'}`} />
+                  </div>
+                  <span className={`text-sm font-medium ${orientation === 'landscape' ? 'text-accent' : 'text-surface-400'}`}>
+                    Landscape
+                  </span>
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={() => setOrientation('portrait')}
+                  className={`flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-all ${
+                    orientation === 'portrait' 
+                      ? 'border-accent bg-accent/10' 
+                      : 'border-surface-700 hover:border-surface-600'
+                  }`}
+                >
+                  <div className={`w-12 h-20 rounded-lg border-2 flex items-center justify-center ${
+                    orientation === 'portrait' ? 'border-accent bg-accent/20' : 'border-surface-600 bg-surface-800'
+                  }`}>
+                    <Smartphone className={`w-6 h-6 ${orientation === 'portrait' ? 'text-accent' : 'text-surface-500'}`} />
+                  </div>
+                  <span className={`text-sm font-medium ${orientation === 'portrait' ? 'text-accent' : 'text-surface-400'}`}>
+                    Portrait
+                  </span>
+                </button>
+              </div>
+            </div>
+            
+            {/* Flip Options */}
+            <div>
+              <label className="block text-sm font-medium text-surface-300 mb-3">Flip Options</label>
+              <p className="text-xs text-surface-500 mb-4">Use these if your display is mounted upside down or mirrored</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setFlipHorizontal(!flipHorizontal)}
+                  className={`flex items-center gap-3 p-4 rounded-xl border-2 transition-all ${
+                    flipHorizontal 
+                      ? 'border-accent bg-accent/10' 
+                      : 'border-surface-700 hover:border-surface-600'
+                  }`}
+                >
+                  <div className={`p-2 rounded-lg ${flipHorizontal ? 'bg-accent/20' : 'bg-surface-800'}`}>
+                    <FlipHorizontal className={`w-5 h-5 ${flipHorizontal ? 'text-accent' : 'text-surface-500'}`} />
+                  </div>
+                  <div className="text-left">
+                    <p className={`text-sm font-medium ${flipHorizontal ? 'text-accent' : 'text-surface-300'}`}>
+                      Flip Horizontal
+                    </p>
+                    <p className="text-xs text-surface-500">Mirror left to right</p>
+                  </div>
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={() => setFlipVertical(!flipVertical)}
+                  className={`flex items-center gap-3 p-4 rounded-xl border-2 transition-all ${
+                    flipVertical 
+                      ? 'border-accent bg-accent/10' 
+                      : 'border-surface-700 hover:border-surface-600'
+                  }`}
+                >
+                  <div className={`p-2 rounded-lg ${flipVertical ? 'bg-accent/20' : 'bg-surface-800'}`}>
+                    <FlipVertical className={`w-5 h-5 ${flipVertical ? 'text-accent' : 'text-surface-500'}`} />
+                  </div>
+                  <div className="text-left">
+                    <p className={`text-sm font-medium ${flipVertical ? 'text-accent' : 'text-surface-300'}`}>
+                      Flip Vertical
+                    </p>
+                    <p className="text-xs text-surface-500">Mirror top to bottom</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+            
+            {/* Preview */}
+            <div className="mt-6 p-4 bg-surface-800 rounded-xl">
+              <p className="text-xs text-surface-500 mb-3 text-center">Preview</p>
+              <div className="flex justify-center">
+                <div 
+                  className={`border-2 border-surface-600 rounded-lg bg-surface-900 flex items-center justify-center text-surface-500 text-xs ${
+                    orientation === 'landscape' ? 'w-32 h-20' : 'w-20 h-32'
+                  }`}
+                  style={{
+                    transform: `${flipHorizontal ? 'scaleX(-1)' : ''} ${flipVertical ? 'scaleY(-1)' : ''}`.trim() || 'none'
+                  }}
+                >
+                  <span style={{ transform: `${flipHorizontal ? 'scaleX(-1)' : ''} ${flipVertical ? 'scaleY(-1)' : ''}`.trim() || 'none' }}>
+                    Content
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
           <div className="card p-6">
             <h2 className="section-title">Schedule Group</h2>
-            <p className="text-sm text-surface-400 mb-4">Assign this device to a schedule group to control when content plays</p>
+            <p className="text-sm text-surface-400 mb-4">Assign this device to a schedule group to display content</p>
             <Select
               value={scheduleGroupId}
               onChange={setScheduleGroupId}
               placeholder="No schedule group"
               options={scheduleGroups?.map(g => ({ value: g.id.toString(), label: g.name })) || []}
             />
-          </div>
-          
-          <div className="card p-6">
-            <h2 className="section-title">Content Groups</h2>
-            <p className="text-sm text-surface-400 mb-4">Select which content groups this device should display when no schedule is active.</p>
-            
-            {contentGroups?.length === 0 ? (
-              <p className="text-surface-500 text-center py-4">
-                No content groups available. <Link to="/content" className="text-accent">Create one</Link>
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {contentGroups?.map(group => (
-                  <label 
-                    key={group.id}
-                    className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                      selectedContentGroups.includes(group.id) ? 'border-accent bg-accent/5' : 'border-surface-700 hover:border-surface-600'
-                    }`}
-                  >
-                    <input type="checkbox" checked={selectedContentGroups.includes(group.id)} onChange={() => toggleContentGroup(group.id)} />
-                    <ColorDot color={group.color} />
-                    <span className="flex-1">{group.name}</span>
-                    <span className="text-sm text-surface-400">{group.content_count} items</span>
-                  </label>
-                ))}
+            {scheduleGroupId && scheduleGroups && (
+              <div className="mt-3">
+                <Link 
+                  to={`/schedules/${scheduleGroupId}`}
+                  className="text-sm text-accent hover:text-accent-400"
+                >
+                  View schedule group →
+                </Link>
               </div>
             )}
           </div>
@@ -255,6 +351,26 @@ export default function DeviceDetail() {
                   <span className="text-sm">{new Date(device.last_seen).toLocaleString()}</span>
                 </div>
               )}
+            </div>
+          </div>
+          
+          <div className="card p-6">
+            <h2 className="section-title">Current Settings</h2>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-surface-400">Orientation</span>
+                <Badge color={orientation === 'landscape' ? 'blue' : 'purple'}>
+                  {orientation}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-surface-400">Flip H</span>
+                <span>{flipHorizontal ? 'Yes' : 'No'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-surface-400">Flip V</span>
+                <span>{flipVertical ? 'Yes' : 'No'}</span>
+              </div>
             </div>
           </div>
         </div>

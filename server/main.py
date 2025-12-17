@@ -27,7 +27,7 @@ from sqlalchemy.orm import sessionmaker, Session, joinedload
 import json
 
 from models import (
-    Base, ContentGroup, ContentItem, ScheduleGroup, Schedule,
+    Base, ScheduleGroup, Schedule, ContentItem,
     Device, DefaultDisplay, BackgroundImage, SyncLog, init_db
 )
 
@@ -121,32 +121,22 @@ def get_db():
         db.close()
 
 # Pydantic Models
-class ContentGroupCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    color: str = "#3B82F6"
-
-class ContentGroupUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    color: Optional[str] = None
-
-class ContentItemUpdate(BaseModel):
-    name: Optional[str] = None
-    display_duration: Optional[float] = None
-    order: Optional[int] = None
-    is_active: Optional[bool] = None
-
 class ScheduleGroupCreate(BaseModel):
     name: str
     description: Optional[str] = None
-    color: str = "#10B981"
+    color: str = "#3B82F6"
     is_active: bool = True
 
 class ScheduleGroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     color: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class ContentItemUpdate(BaseModel):
+    name: Optional[str] = None
+    display_duration: Optional[float] = None
+    order: Optional[int] = None
     is_active: Optional[bool] = None
 
 class ScheduleCreate(BaseModel):
@@ -157,7 +147,6 @@ class ScheduleCreate(BaseModel):
     days_of_week: str = "0123456"
     priority: int = 0
     is_active: bool = True
-    content_group_ids: List[int] = []
 
 class ScheduleUpdate(BaseModel):
     name: Optional[str] = None
@@ -166,7 +155,6 @@ class ScheduleUpdate(BaseModel):
     days_of_week: Optional[str] = None
     priority: Optional[int] = None
     is_active: Optional[bool] = None
-    content_group_ids: Optional[List[int]] = None
 
 class DeviceCreate(BaseModel):
     name: str
@@ -178,8 +166,10 @@ class DeviceUpdate(BaseModel):
     description: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
+    orientation: Optional[str] = None
+    flip_horizontal: Optional[bool] = None
+    flip_vertical: Optional[bool] = None
     schedule_group_id: Optional[int] = None
-    content_group_ids: Optional[List[int]] = None
 
 class DefaultDisplayUpdate(BaseModel):
     logo_scale: Optional[float] = None
@@ -203,17 +193,6 @@ def get_file_hash(file_path: Path) -> str:
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
-def serialize_content_group(group: ContentGroup) -> dict:
-    return {
-        "id": group.id,
-        "name": group.name,
-        "description": group.description,
-        "color": group.color,
-        "content_count": len(group.content_items),
-        "created_at": group.created_at.isoformat() if group.created_at else None,
-        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
-    }
-
 def serialize_content_item(item: ContentItem) -> dict:
     return {
         "id": item.id,
@@ -228,7 +207,7 @@ def serialize_content_item(item: ContentItem) -> dict:
         "height": item.height,
         "order": item.order,
         "is_active": item.is_active,
-        "group_id": item.group_id,
+        "schedule_group_id": item.schedule_group_id,
         "url": f"/uploads/content/{item.filename}",
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }
@@ -240,9 +219,11 @@ def serialize_schedule_group(group: ScheduleGroup) -> dict:
         "description": group.description,
         "color": group.color,
         "is_active": group.is_active,
-        "schedule_count": len(group.schedules),
-        "device_count": len(group.devices),
+        "content_count": len(group.content_items) if group.content_items else 0,
+        "schedule_count": len(group.schedules) if group.schedules else 0,
+        "device_count": len(group.devices) if group.devices else 0,
         "created_at": group.created_at.isoformat() if group.created_at else None,
+        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
     }
 
 def serialize_schedule(schedule: Schedule) -> dict:
@@ -255,7 +236,6 @@ def serialize_schedule(schedule: Schedule) -> dict:
         "days_of_week": schedule.days_of_week,
         "priority": schedule.priority,
         "is_active": schedule.is_active,
-        "content_groups": [serialize_content_group(cg) for cg in schedule.content_groups],
         "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
     }
 
@@ -273,9 +253,11 @@ def serialize_device(device: Device) -> dict:
         "is_registered": device.is_registered,
         "screen_width": device.screen_width,
         "screen_height": device.screen_height,
+        "orientation": device.orientation,
+        "flip_horizontal": device.flip_horizontal,
+        "flip_vertical": device.flip_vertical,
         "schedule_group_id": device.schedule_group_id,
         "schedule_group": serialize_schedule_group(device.schedule_group) if device.schedule_group else None,
-        "content_groups": [serialize_content_group(cg) for cg in device.content_groups],
         "created_at": device.created_at.isoformat() if device.created_at else None,
     }
 
@@ -288,6 +270,8 @@ def serialize_default_display(display: DefaultDisplay) -> dict:
         "logo_position": display.logo_position,
         "background_mode": display.background_mode,
         "background_color": display.background_color,
+        "background_video_filename": display.background_video_filename,
+        "background_video_url": f"/uploads/backgrounds/{display.background_video_filename}" if display.background_video_filename else None,
         "slideshow_duration": display.slideshow_duration,
         "slideshow_transition": display.slideshow_transition,
         "backgrounds": [
@@ -303,51 +287,59 @@ def serialize_default_display(display: DefaultDisplay) -> dict:
         ],
     }
 
-# ============== Content Groups ==============
+# ============== Schedule Groups (now includes content) ==============
 
-@app.get("/api/content-groups")
-def list_content_groups(db: Session = Depends(get_db)):
-    groups = db.query(ContentGroup).options(joinedload(ContentGroup.content_items)).all()
-    return [serialize_content_group(g) for g in groups]
+@app.get("/api/schedule-groups")
+def list_schedule_groups(db: Session = Depends(get_db)):
+    groups = db.query(ScheduleGroup).options(
+        joinedload(ScheduleGroup.schedules),
+        joinedload(ScheduleGroup.devices),
+        joinedload(ScheduleGroup.content_items)
+    ).all()
+    return [serialize_schedule_group(g) for g in groups]
 
-@app.post("/api/content-groups")
-def create_content_group(data: ContentGroupCreate, db: Session = Depends(get_db)):
-    group = ContentGroup(**data.model_dump())
+@app.post("/api/schedule-groups")
+def create_schedule_group(data: ScheduleGroupCreate, db: Session = Depends(get_db)):
+    group = ScheduleGroup(**data.model_dump())
     db.add(group)
     db.commit()
     db.refresh(group)
-    return serialize_content_group(group)
+    return serialize_schedule_group(group)
 
-@app.get("/api/content-groups/{group_id}")
-def get_content_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(ContentGroup).options(
-        joinedload(ContentGroup.content_items)
-    ).filter(ContentGroup.id == group_id).first()
+@app.get("/api/schedule-groups/{group_id}")
+def get_schedule_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ScheduleGroup).options(
+        joinedload(ScheduleGroup.schedules),
+        joinedload(ScheduleGroup.devices),
+        joinedload(ScheduleGroup.content_items)
+    ).filter(ScheduleGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Content group not found")
+        raise HTTPException(status_code=404, detail="Schedule group not found")
     
-    result = serialize_content_group(group)
+    result = serialize_schedule_group(group)
+    result["schedules"] = [serialize_schedule(s) for s in group.schedules]
+    result["devices"] = [serialize_device(d) for d in group.devices]
     result["content_items"] = [serialize_content_item(item) for item in sorted(group.content_items, key=lambda x: x.order)]
     return result
 
-@app.patch("/api/content-groups/{group_id}")
-def update_content_group(group_id: int, data: ContentGroupUpdate, db: Session = Depends(get_db)):
-    group = db.query(ContentGroup).filter(ContentGroup.id == group_id).first()
+@app.patch("/api/schedule-groups/{group_id}")
+def update_schedule_group(group_id: int, data: ScheduleGroupUpdate, db: Session = Depends(get_db)):
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Content group not found")
+        raise HTTPException(status_code=404, detail="Schedule group not found")
     
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(group, key, value)
     
     db.commit()
     db.refresh(group)
-    return serialize_content_group(group)
+    return serialize_schedule_group(group)
 
-@app.delete("/api/content-groups/{group_id}")
-def delete_content_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(ContentGroup).filter(ContentGroup.id == group_id).first()
+@app.delete("/api/schedule-groups/{group_id}")
+def delete_schedule_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Content group not found")
+        raise HTTPException(status_code=404, detail="Schedule group not found")
     
     # Delete associated content files
     for item in group.content_items:
@@ -359,9 +351,9 @@ def delete_content_group(group_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "deleted"}
 
-# ============== Content Items ==============
+# ============== Content Items (now part of schedule groups) ==============
 
-@app.post("/api/content-groups/{group_id}/content")
+@app.post("/api/schedule-groups/{group_id}/content")
 async def upload_content(
     group_id: int,
     file: UploadFile = File(...),
@@ -369,9 +361,9 @@ async def upload_content(
     display_duration: float = Form(10.0),
     db: Session = Depends(get_db)
 ):
-    group = db.query(ContentGroup).filter(ContentGroup.id == group_id).first()
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Content group not found")
+        raise HTTPException(status_code=404, detail="Schedule group not found")
     
     # Determine file type
     mime_type = file.content_type or "application/octet-stream"
@@ -393,7 +385,7 @@ async def upload_content(
         f.write(content)
     
     # Get max order
-    max_order = db.query(ContentItem).filter(ContentItem.group_id == group_id).count()
+    max_order = db.query(ContentItem).filter(ContentItem.schedule_group_id == group_id).count()
     
     # Create content item
     item = ContentItem(
@@ -404,7 +396,7 @@ async def upload_content(
         file_size=len(content),
         display_duration=display_duration,
         order=max_order,
-        group_id=group_id,
+        schedule_group_id=group_id,
     )
     db.add(item)
     db.commit()
@@ -432,7 +424,7 @@ async def update_content_item(item_id: int, data: ContentItemUpdate, db: Session
     
     await manager.broadcast({
         "type": "content_updated",
-        "group_id": item.group_id,
+        "group_id": item.schedule_group_id,
     })
     
     return serialize_content_item(item)
@@ -443,7 +435,7 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
     if not item:
         raise HTTPException(status_code=404, detail="Content item not found")
     
-    group_id = item.group_id
+    group_id = item.schedule_group_id
     
     # Delete file
     file_path = CONTENT_DIR / item.filename
@@ -460,12 +452,12 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
     
     return {"status": "deleted"}
 
-@app.post("/api/content-groups/{group_id}/reorder")
+@app.post("/api/schedule-groups/{group_id}/reorder")
 async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depends(get_db)):
     for order, item_id in enumerate(item_ids):
         item = db.query(ContentItem).filter(
             ContentItem.id == item_id,
-            ContentItem.group_id == group_id
+            ContentItem.schedule_group_id == group_id
         ).first()
         if item:
             item.order = order
@@ -478,61 +470,6 @@ async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depe
     })
     
     return {"status": "reordered"}
-
-# ============== Schedule Groups ==============
-
-@app.get("/api/schedule-groups")
-def list_schedule_groups(db: Session = Depends(get_db)):
-    groups = db.query(ScheduleGroup).options(
-        joinedload(ScheduleGroup.schedules),
-        joinedload(ScheduleGroup.devices)
-    ).all()
-    return [serialize_schedule_group(g) for g in groups]
-
-@app.post("/api/schedule-groups")
-def create_schedule_group(data: ScheduleGroupCreate, db: Session = Depends(get_db)):
-    group = ScheduleGroup(**data.model_dump())
-    db.add(group)
-    db.commit()
-    db.refresh(group)
-    return serialize_schedule_group(group)
-
-@app.get("/api/schedule-groups/{group_id}")
-def get_schedule_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(ScheduleGroup).options(
-        joinedload(ScheduleGroup.schedules).joinedload(Schedule.content_groups),
-        joinedload(ScheduleGroup.devices)
-    ).filter(ScheduleGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Schedule group not found")
-    
-    result = serialize_schedule_group(group)
-    result["schedules"] = [serialize_schedule(s) for s in group.schedules]
-    result["devices"] = [serialize_device(d) for d in group.devices]
-    return result
-
-@app.patch("/api/schedule-groups/{group_id}")
-def update_schedule_group(group_id: int, data: ScheduleGroupUpdate, db: Session = Depends(get_db)):
-    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Schedule group not found")
-    
-    for key, value in data.model_dump(exclude_unset=True).items():
-        setattr(group, key, value)
-    
-    db.commit()
-    db.refresh(group)
-    return serialize_schedule_group(group)
-
-@app.delete("/api/schedule-groups/{group_id}")
-def delete_schedule_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Schedule group not found")
-    
-    db.delete(group)
-    db.commit()
-    return {"status": "deleted"}
 
 # ============== Schedules ==============
 
@@ -547,13 +484,6 @@ async def create_schedule(data: ScheduleCreate, db: Session = Depends(get_db)):
         priority=data.priority,
         is_active=data.is_active,
     )
-    
-    # Add content groups
-    if data.content_group_ids:
-        content_groups = db.query(ContentGroup).filter(
-            ContentGroup.id.in_(data.content_group_ids)
-        ).all()
-        schedule.content_groups = content_groups
     
     db.add(schedule)
     db.commit()
@@ -576,16 +506,8 @@ async def update_schedule(schedule_id: int, data: ScheduleUpdate, db: Session = 
     if "end_time" in update_data:
         update_data["end_time"] = parse_time(update_data["end_time"])
     
-    content_group_ids = update_data.pop("content_group_ids", None)
-    
     for key, value in update_data.items():
         setattr(schedule, key, value)
-    
-    if content_group_ids is not None:
-        content_groups = db.query(ContentGroup).filter(
-            ContentGroup.id.in_(content_group_ids)
-        ).all()
-        schedule.content_groups = content_groups
     
     db.commit()
     db.refresh(schedule)
@@ -612,8 +534,7 @@ async def delete_schedule(schedule_id: int, db: Session = Depends(get_db)):
 @app.get("/api/devices")
 def list_devices(db: Session = Depends(get_db)):
     devices = db.query(Device).options(
-        joinedload(Device.schedule_group),
-        joinedload(Device.content_groups)
+        joinedload(Device.schedule_group)
     ).all()
     return [serialize_device(d) for d in devices]
 
@@ -635,7 +556,7 @@ def create_device(data: DeviceCreate, db: Session = Depends(get_db)):
 def get_device(device_id: int, db: Session = Depends(get_db)):
     device = db.query(Device).options(
         joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules),
-        joinedload(Device.content_groups).joinedload(ContentGroup.content_items)
+        joinedload(Device.schedule_group).joinedload(ScheduleGroup.content_items)
     ).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -648,22 +569,15 @@ async def update_device(device_id: int, data: DeviceUpdate, db: Session = Depend
         raise HTTPException(status_code=404, detail="Device not found")
     
     update_data = data.model_dump(exclude_unset=True)
-    content_group_ids = update_data.pop("content_group_ids", None)
     
     for key, value in update_data.items():
         setattr(device, key, value)
-    
-    if content_group_ids is not None:
-        content_groups = db.query(ContentGroup).filter(
-            ContentGroup.id.in_(content_group_ids)
-        ).all()
-        device.content_groups = content_groups
     
     db.commit()
     db.refresh(device)
     
     # Notify the specific device
-    await manager.send_to_device(device.device_key, {
+    await manager.send_to_device(device.access_code, {
         "type": "config_updated",
     })
     
@@ -691,7 +605,7 @@ def regenerate_access_code(device_id: int, db: Session = Depends(get_db)):
     db.refresh(device)
     return {"access_code": device.access_code}
 
-# ============== Default Display ==============
+# ============== Default Display (Splash Screen) ==============
 
 @app.get("/api/default-display")
 def get_default_display(db: Session = Depends(get_db)):
@@ -830,6 +744,58 @@ async def delete_background(background_id: int, db: Session = Depends(get_db)):
     
     return {"status": "deleted"}
 
+@app.post("/api/default-display/background-video")
+async def upload_background_video(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    display = db.query(DefaultDisplay).first()
+    if not display:
+        display = DefaultDisplay()
+        db.add(display)
+    
+    # Check if it's a video
+    mime_type = file.content_type or ""
+    if not mime_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="File must be a video")
+    
+    # Delete old video if exists
+    if display.background_video_filename:
+        old_path = BACKGROUNDS_DIR / display.background_video_filename
+        if old_path.exists():
+            old_path.unlink()
+    
+    # Save new video
+    ext = Path(file.filename).suffix
+    unique_filename = f"bgvideo_{uuid.uuid4().hex}{ext}"
+    file_path = BACKGROUNDS_DIR / unique_filename
+    
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    
+    display.background_video_filename = unique_filename
+    db.commit()
+    db.refresh(display)
+    
+    await manager.broadcast({"type": "default_display_updated"})
+    
+    return serialize_default_display(display)
+
+@app.delete("/api/default-display/background-video")
+async def delete_background_video(db: Session = Depends(get_db)):
+    display = db.query(DefaultDisplay).first()
+    if display and display.background_video_filename:
+        file_path = BACKGROUNDS_DIR / display.background_video_filename
+        if file_path.exists():
+            file_path.unlink()
+        display.background_video_filename = None
+        db.commit()
+    
+    await manager.broadcast({"type": "default_display_updated"})
+    
+    return {"status": "deleted"}
+
 # ============== Player API ==============
 
 @app.get("/api/discover")
@@ -869,8 +835,8 @@ def register_player(access_code: str = Form(...), db: Session = Depends(get_db))
 def get_player_config(access_code: str, db: Session = Depends(get_db)):
     """Get configuration for a player device"""
     device = db.query(Device).options(
-        joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules).joinedload(Schedule.content_groups).joinedload(ContentGroup.content_items),
-        joinedload(Device.content_groups).joinedload(ContentGroup.content_items)
+        joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules),
+        joinedload(Device.schedule_group).joinedload(ScheduleGroup.content_items)
     ).filter(Device.access_code == access_code).first()
     
     if not device:
@@ -881,27 +847,17 @@ def get_player_config(access_code: str, db: Session = Depends(get_db)):
     device.is_online = True
     db.commit()
     
-    # Get default display
+    # Get default display (splash screen)
     default_display = db.query(DefaultDisplay).options(
         joinedload(DefaultDisplay.backgrounds)
     ).first()
     
-    # Build content manifest
+    # Build content manifest from schedule group
     content_items = {}
-    
-    # Add content from device's content groups
-    for group in device.content_groups:
-        for item in group.content_items:
+    if device.schedule_group:
+        for item in device.schedule_group.content_items:
             if item.is_active:
                 content_items[item.id] = serialize_content_item(item)
-    
-    # Add content from schedule's content groups
-    if device.schedule_group:
-        for schedule in device.schedule_group.schedules:
-            for group in schedule.content_groups:
-                for item in group.content_items:
-                    if item.is_active:
-                        content_items[item.id] = serialize_content_item(item)
     
     return {
         "device": serialize_device(device),
@@ -914,8 +870,8 @@ def get_player_config(access_code: str, db: Session = Depends(get_db)):
 def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
     """Get current playlist for a player device based on current time and schedule"""
     device = db.query(Device).options(
-        joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules).joinedload(Schedule.content_groups).joinedload(ContentGroup.content_items),
-        joinedload(Device.content_groups).joinedload(ContentGroup.content_items)
+        joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules),
+        joinedload(Device.schedule_group).joinedload(ScheduleGroup.content_items)
     ).filter(Device.access_code == access_code).first()
     
     if not device:
@@ -927,13 +883,38 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
     
     playlist = []
     active_schedule = None
+    debug_info = {
+        "current_time": current_time.strftime("%H:%M:%S"),
+        "current_day": current_day,
+        "has_schedule_group": device.schedule_group is not None,
+        "schedule_group_active": device.schedule_group.is_active if device.schedule_group else False,
+        "total_schedules": 0,
+        "total_content": 0,
+        "schedule_check_results": [],
+    }
     
     # Check if there's an active schedule
     if device.schedule_group and device.schedule_group.is_active:
+        debug_info["total_schedules"] = len(device.schedule_group.schedules)
+        debug_info["total_content"] = len(device.schedule_group.content_items)
+        
         for schedule in device.schedule_group.schedules:
+            schedule_info = {
+                "name": schedule.name,
+                "start": schedule.start_time.strftime("%H:%M"),
+                "end": schedule.end_time.strftime("%H:%M"),
+                "days": schedule.days_of_week,
+                "is_active": schedule.is_active,
+                "day_match": current_day in schedule.days_of_week,
+                "time_match": False,
+                "selected": False,
+            }
+            
             if not schedule.is_active:
+                debug_info["schedule_check_results"].append(schedule_info)
                 continue
             if current_day not in schedule.days_of_week:
+                debug_info["schedule_check_results"].append(schedule_info)
                 continue
             
             # Handle schedules that cross midnight
@@ -942,27 +923,40 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
             else:
                 in_range = current_time >= schedule.start_time or current_time <= schedule.end_time
             
+            schedule_info["time_match"] = in_range
+            
             if in_range:
                 if active_schedule is None or schedule.priority > active_schedule.priority:
                     active_schedule = schedule
-    
-    if active_schedule:
-        # Get content from schedule's content groups
-        for group in active_schedule.content_groups:
-            for item in sorted(group.content_items, key=lambda x: x.order):
+                    schedule_info["selected"] = True
+            
+            debug_info["schedule_check_results"].append(schedule_info)
+        
+        # Get content from schedule group if schedule is active
+        if active_schedule:
+            for item in sorted(device.schedule_group.content_items, key=lambda x: x.order):
                 if item.is_active:
                     playlist.append(serialize_content_item(item))
-    else:
-        # Fall back to device's content groups if no active schedule
-        for group in device.content_groups:
-            for item in sorted(group.content_items, key=lambda x: x.order):
-                if item.is_active:
-                    playlist.append(serialize_content_item(item))
+        
+        # If no active schedule but there's content, optionally play it anyway
+        # This makes testing easier - content plays even without a matching schedule
+        if not active_schedule and len(device.schedule_group.content_items) > 0:
+            debug_info["fallback_mode"] = True
+            # Uncomment the following lines to always play content regardless of schedule:
+            # for item in sorted(device.schedule_group.content_items, key=lambda x: x.order):
+            #     if item.is_active:
+            #         playlist.append(serialize_content_item(item))
     
     return {
         "playlist": playlist,
         "active_schedule": serialize_schedule(active_schedule) if active_schedule else None,
+        "device": {
+            "orientation": device.orientation,
+            "flip_horizontal": device.flip_horizontal,
+            "flip_vertical": device.flip_vertical,
+        },
         "server_time": datetime.utcnow().isoformat(),
+        "debug": debug_info,
     }
 
 # ============== WebSocket ==============
@@ -1006,12 +1000,12 @@ async def websocket_endpoint(websocket: WebSocket, access_code: str, db: Session
 
 @app.get("/api/stats")
 def get_stats(db: Session = Depends(get_db)):
+    total_content = db.query(ContentItem).count()
     return {
         "total_devices": db.query(Device).count(),
         "online_devices": db.query(Device).filter(Device.is_online == True).count(),
-        "content_groups": db.query(ContentGroup).count(),
         "schedule_groups": db.query(ScheduleGroup).count(),
-        "total_content": db.query(ContentItem).count(),
+        "total_content": total_content,
     }
 
 # ============== Health Check ==============

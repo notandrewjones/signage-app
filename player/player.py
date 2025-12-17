@@ -1,485 +1,392 @@
 #!/usr/bin/env python3
-# player/player.py
 """
-Digital Signage Player - Cross-Platform Client
-A self-contained player that runs on Windows, macOS, and Linux
+Digital Signage Player
+Cross-platform player using pywebview with proper image scaling and orientation support
 """
-
 import os
 import sys
 import json
 import time
-import threading
+import socket
 import hashlib
+import threading
 import urllib.request
 import urllib.error
-import ssl
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, field
-import logging
+import webview
 
-# Setup paths - use app directory for portable mode, or user directory
-if getattr(sys, 'frozen', False):
-    # Running as compiled executable
-    APP_DIR = Path(sys.executable).parent
-else:
-    # Running as script
-    APP_DIR = Path(__file__).parent
+# Configuration
+CONFIG_FILE = Path.home() / ".signage_player" / "config.json"
+CACHE_DIR = Path.home() / ".signage_player" / "cache"
+DEFAULT_SERVER = "http://localhost:8000"
 
-DATA_DIR = APP_DIR / "data"
-CONTENT_DIR = DATA_DIR / "content"
-CONFIG_FILE = DATA_DIR / "config.json"
-LOG_FILE = DATA_DIR / "player.log"
-
-# Create directories
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-CONTENT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Ensure directories exist
+CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-@dataclass
 class Config:
-    server_url: str = ""
-    access_code: str = ""
-    sync_interval: int = 60
-    fullscreen: bool = True
-    window_width: int = 1280
-    window_height: int = 720
+    """Player configuration management"""
+    def __init__(self):
+        self.server_url = DEFAULT_SERVER
+        self.access_code = None
+        self.device_name = None
+        self.fullscreen = True
+        self.debug = False
+        self.load()
     
-    def save(self):
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(self.__dict__, indent=2))
-        logger.info(f"Configuration saved to {CONFIG_FILE}")
-        logger.info(f"Config contents: server_url={self.server_url}, access_code={self.access_code}")
-    
-    @classmethod
-    def load(cls) -> 'Config':
-        logger.info(f"Looking for config at: {CONFIG_FILE}")
-        logger.info(f"Config file exists: {CONFIG_FILE.exists()}")
+    def load(self):
         if CONFIG_FILE.exists():
             try:
-                data = json.loads(CONFIG_FILE.read_text())
-                logger.info(f"Loaded config data: {data}")
-                # Handle migration from old device_key to access_code
-                if 'device_key' in data and 'access_code' not in data:
-                    data['access_code'] = data.pop('device_key')
-                config = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-                logger.info(f"Config object: server_url={config.server_url}, access_code={config.access_code}")
-                return config
+                with open(CONFIG_FILE) as f:
+                    data = json.load(f)
+                    self.server_url = data.get("server_url", DEFAULT_SERVER)
+                    self.access_code = data.get("access_code")
+                    self.device_name = data.get("device_name")
+                    self.fullscreen = data.get("fullscreen", True)
+                    self.debug = data.get("debug", False)
             except Exception as e:
-                logger.error(f"Error loading config: {e}")
-        else:
-            logger.info("No config file found, using defaults")
-        return cls()
-
-
-@dataclass 
-class ContentItem:
-    id: int
-    name: str
-    filename: str
-    file_type: str
-    url: str
-    display_duration: float
-    file_size: int
+                print(f"Error loading config: {e}")
     
-    @property
-    def local_path(self) -> Path:
-        return CONTENT_DIR / self.filename
+    def save(self):
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({
+                    "server_url": self.server_url,
+                    "access_code": self.access_code,
+                    "device_name": self.device_name,
+                    "fullscreen": self.fullscreen,
+                    "debug": self.debug,
+                }, f, indent=2)
+        except Exception as e:
+            print(f"Error saving config: {e}")
     
-    @property
-    def local_url(self) -> str:
-        return self.local_path.as_uri()
+    def clear(self):
+        self.access_code = None
+        self.device_name = None
+        self.save()
 
 
-class SignagePlayer:
-    """Main player controller"""
+config = Config()
+
+
+class PlayerAPI:
+    """API exposed to JavaScript in the webview"""
     
-    def __init__(self, config: Config):
-        self.config = config
-        self.playlist: List[ContentItem] = []
-        self.current_index: int = 0
-        self.default_display: Optional[Dict] = None
-        self.running: bool = False
-        self.last_sync: float = 0
-        self.sync_lock = threading.Lock()
-        self.on_content_change = None  # Callback for UI updates
-        
-    def api_request(self, endpoint: str) -> Optional[Dict]:
-        """Make API request to server"""
-        if not self.config.server_url:
-            return None
-            
-        url = f"{self.config.server_url.rstrip('/')}/api{endpoint}"
+    def __init__(self, window):
+        self.window = window
+        self.playlist = []
+        self.current_index = 0
+        self.orientation = "landscape"
+        self.flip_horizontal = False
+        self.flip_vertical = False
+        self.running = True
+    
+    def get_config(self):
+        return {
+            "server_url": config.server_url,
+            "access_code": config.access_code,
+            "device_name": config.device_name,
+            "is_connected": config.access_code is not None,
+        }
+    
+    def register(self, server_url, access_code):
+        """Register with the server using access code"""
+        config.server_url = server_url.rstrip("/")
         
         try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            data = urllib.parse.urlencode({"access_code": access_code}).encode()
+            req = urllib.request.Request(
+                f"{config.server_url}/api/player/register",
+                data=data,
+                method="POST"
+            )
             
-            req = urllib.request.Request(url)
-            req.add_header('Content-Type', 'application/json')
-            
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
-                return json.loads(response.read().decode())
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read())
+                if result.get("success"):
+                    config.access_code = access_code
+                    config.device_name = result.get("device_name")
+                    config.save()
+                    return {"success": True, "device_name": config.device_name}
+                else:
+                    return {"success": False, "error": "Registration failed"}
         except urllib.error.HTTPError as e:
-            logger.error(f"HTTP error {e.code}: {e.reason}")
-        except urllib.error.URLError as e:
-            logger.error(f"URL error: {e.reason}")
+            error_body = e.read().decode()
+            try:
+                error_data = json.loads(error_body)
+                return {"success": False, "error": error_data.get("detail", "Invalid access code")}
+            except:
+                return {"success": False, "error": f"HTTP {e.code}"}
         except Exception as e:
-            logger.error(f"Request error: {e}")
-        
-        return None
+            return {"success": False, "error": str(e)}
     
-    def download_file(self, url: str, local_path: Path) -> bool:
-        """Download a file from the server"""
-        if not self.config.server_url or not url:
-            return False
-            
-        full_url = f"{self.config.server_url.rstrip('/')}{url}"
+    def disconnect(self):
+        """Disconnect from server"""
+        config.clear()
+        self.playlist = []
+        return {"success": True}
+    
+    def get_playlist(self):
+        """Fetch current playlist from server"""
+        if not config.access_code:
+            return {"success": False, "error": "Not connected"}
         
         try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(
+                f"{config.server_url}/api/player/{config.access_code}/playlist"
+            )
             
-            logger.info(f"Downloading: {url}")
-            
-            with urllib.request.urlopen(full_url, timeout=300, context=ctx) as response:
-                local_path.write_bytes(response.read())
-            
-            logger.info(f"Downloaded: {local_path.name}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return False
-    
-    def sync_content(self) -> bool:
-        """Sync content from server"""
-        if not self.config.access_code or not self.config.server_url:
-            logger.warning("No access code or server URL configured")
-            return False
-            
-        with self.sync_lock:
-            logger.info("Syncing content...")
-            
-            # Get playlist
-            playlist_data = self.api_request(f"/player/{self.config.access_code}/playlist")
-            if not playlist_data:
-                logger.error("Failed to get playlist")
-                return False
-            
-            # Get config for default display
-            config_data = self.api_request(f"/player/{self.config.access_code}/config")
-            if config_data:
-                self.default_display = config_data.get('default_display')
-            
-            # Parse playlist
-            new_playlist = []
-            for item_data in playlist_data.get('playlist', []):
-                item = ContentItem(
-                    id=item_data['id'],
-                    name=item_data['name'],
-                    filename=item_data['filename'],
-                    file_type=item_data['file_type'],
-                    url=item_data['url'],
-                    display_duration=item_data['display_duration'],
-                    file_size=item_data['file_size']
-                )
-                new_playlist.append(item)
-            
-            # Download missing content
-            for item in new_playlist:
-                if not item.local_path.exists() or item.local_path.stat().st_size != item.file_size:
-                    self.download_file(item.url, item.local_path)
-            
-            # Download default display assets
-            if self.default_display:
-                logo_url = self.default_display.get('logo_url')
-                if logo_url:
-                    logo_filename = self.default_display.get('logo_filename', 'logo.png')
-                    logo_path = CONTENT_DIR / f"_logo_{logo_filename}"
-                    if not logo_path.exists():
-                        self.download_file(logo_url, logo_path)
-                    self.default_display['_local_logo'] = logo_path.as_uri()
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read())
+                self.playlist = result.get("playlist", [])
                 
-                for bg in self.default_display.get('backgrounds') or []:
-                    bg_url = bg.get('url')
-                    if bg_url:
-                        bg_path = CONTENT_DIR / f"_bg_{bg['filename']}"
-                        if not bg_path.exists():
-                            self.download_file(bg_url, bg_path)
-                        bg['_local_url'] = bg_path.as_uri()
-            
-            # Clean up old files
-            current_filenames = {item.filename for item in new_playlist}
-            if self.default_display:
-                logo_filename = self.default_display.get('logo_filename')
-                if logo_filename:
-                    current_filenames.add(f'_logo_{logo_filename}')
-                for bg in self.default_display.get('backgrounds') or []:
-                    bg_filename = bg.get('filename')
-                    if bg_filename:
-                        current_filenames.add(f"_bg_{bg_filename}")
-            
-            for file_path in CONTENT_DIR.iterdir():
-                if file_path.name not in current_filenames and not file_path.name.startswith('_'):
-                    try:
-                        file_path.unlink()
-                        logger.info(f"Removed old file: {file_path.name}")
-                    except Exception as e:
-                        logger.error(f"Error removing file: {e}")
-            
-            self.playlist = new_playlist
-            self.last_sync = time.time()
-            
-            logger.info(f"Sync complete. {len(new_playlist)} items in playlist")
-            return True
+                # Get orientation settings from device config
+                device_config = result.get("device", {})
+                self.orientation = device_config.get("orientation", "landscape")
+                self.flip_horizontal = device_config.get("flip_horizontal", False)
+                self.flip_vertical = device_config.get("flip_vertical", False)
+                
+                return {
+                    "success": True,
+                    "playlist": self.playlist,
+                    "active_schedule": result.get("active_schedule"),
+                    "orientation": self.orientation,
+                    "flip_horizontal": self.flip_horizontal,
+                    "flip_vertical": self.flip_vertical,
+                    "debug": result.get("debug"),  # Pass through server debug info
+                }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
-    def get_current_content(self) -> Optional[ContentItem]:
-        """Get current content item"""
-        if not self.playlist:
-            return None
-        if self.current_index >= len(self.playlist):
-            self.current_index = 0
-        return self.playlist[self.current_index]
+    def get_default_display(self):
+        """Fetch splash screen settings"""
+        if not config.access_code:
+            return {"success": False, "error": "Not connected"}
+        
+        try:
+            req = urllib.request.Request(
+                f"{config.server_url}/api/player/{config.access_code}/config"
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read())
+                default_display = result.get("default_display", {})
+                
+                # Get orientation settings
+                device = result.get("device", {})
+                
+                return {
+                    "success": True,
+                    "default_display": default_display,
+                    "server_url": config.server_url,  # Include server URL for building full paths
+                    "orientation": device.get("orientation", "landscape"),
+                    "flip_horizontal": device.get("flip_horizontal", False),
+                    "flip_vertical": device.get("flip_vertical", False),
+                }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
-    def advance(self):
-        """Move to next content item"""
-        if self.playlist:
-            self.current_index = (self.current_index + 1) % len(self.playlist)
-            if self.on_content_change:
-                self.on_content_change()
+    def get_content_url(self, filename):
+        """Get full URL for content file"""
+        return f"{config.server_url}/uploads/content/{filename}"
     
-    def get_current_duration(self) -> float:
-        """Get duration for current content"""
-        item = self.get_current_content()
-        return item.display_duration if item else 10.0
+    def get_screen_info(self):
+        """Get screen dimensions"""
+        return {
+            "width": self.window.width if hasattr(self.window, 'width') else 1920,
+            "height": self.window.height if hasattr(self.window, 'height') else 1080,
+        }
+    
+    def log(self, message):
+        """Log message from JavaScript"""
+        print(f"[JS] {message}")
 
 
-# HTML template for the player display
-PLAYER_HTML = '''
+def get_player_html():
+    """Generate the player HTML with proper image scaling and orientation support"""
+    return r'''
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Signage Player</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
         
-        html, body {
-            width: 100%;
-            height: 100%;
+        body {
             background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             overflow: hidden;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            width: 100vw;
+            height: 100vh;
         }
         
-        #content-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
+        #player-container {
             width: 100%;
             height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            position: relative;
         }
         
-        #background {
+        /* Content display - uses object-fit: contain for proper scaling */
+        #content-display {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background-size: cover;
-            background-position: center;
-            z-index: 1;
-            transition: opacity 1s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
         }
         
-        #media {
-            position: relative;
-            z-index: 2;
+        #content-display img,
+        #content-display video {
             max-width: 100%;
             max-height: 100%;
-            object-fit: contain;
+            width: 100%;
+            height: 100%;
+            object-fit: contain; /* Show full image, touch edges, maintain aspect ratio */
         }
         
-        #logo {
-            position: relative;
-            z-index: 2;
+        /* Splash screen */
+        #splash-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            z-index: 1;
+        }
+        
+        #splash-screen.position-top {
+            align-items: flex-start;
+            padding-top: 5%;
+        }
+        
+        #splash-screen.position-bottom {
+            align-items: flex-end;
+            padding-bottom: 5%;
+        }
+        
+        #splash-logo {
             max-width: 80%;
             max-height: 80%;
             object-fit: contain;
+            position: relative;
+            z-index: 2;
         }
         
-        /* Setup screen styles */
-        #setup-screen {
-            display: none;
-            position: fixed;
+        #splash-background {
+            position: absolute;
             top: 0;
             left: 0;
-            width: 100vw;
-            height: 100vh;
-            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #0f0f1a 100%);
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 0;
+        }
+        
+        /* Setup screen */
+        #setup-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             z-index: 1000;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: white;
         }
         
-        #setup-screen.active { display: flex; }
-        
-        .setup-container {
-            text-align: center;
-            width: 90%;
-            max-width: 480px;
-        }
-        
-        .setup-icon {
-            width: 80px;
-            height: 80px;
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        .setup-card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
             border-radius: 24px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 24px;
-            font-size: 40px;
+            padding: 48px;
+            max-width: 480px;
+            width: 90%;
+            text-align: center;
+            backdrop-filter: blur(20px);
         }
         
-        .setup-title {
-            font-size: 32px;
-            font-weight: 700;
+        .setup-card h1 {
+            font-size: 28px;
             margin-bottom: 8px;
-            letter-spacing: -0.5px;
         }
         
-        .setup-subtitle {
-            color: rgba(255,255,255,0.5);
-            margin-bottom: 48px;
-            font-size: 16px;
-        }
-        
-        /* Step indicator */
-        .steps {
-            display: flex;
-            justify-content: center;
-            gap: 8px;
+        .setup-card p {
+            color: rgba(255,255,255,0.6);
             margin-bottom: 32px;
         }
         
-        .step-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.2);
-            transition: all 0.3s;
-        }
-        
-        .step-dot.active {
-            background: #6366f1;
-            width: 24px;
-            border-radius: 4px;
-        }
-        
-        .step-dot.complete {
-            background: #22c55e;
-        }
-        
-        /* Form styles */
-        .form-section {
-            display: none;
-            animation: fadeIn 0.3s ease;
-        }
-        
-        .form-section.active { display: block; }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .form-label {
-            display: block;
+        .form-group {
+            margin-bottom: 20px;
             text-align: left;
-            margin-bottom: 8px;
-            font-weight: 500;
-            color: rgba(255,255,255,0.7);
-            font-size: 14px;
         }
         
-        .form-input {
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: rgba(255,255,255,0.8);
+        }
+        
+        .form-group input {
             width: 100%;
-            padding: 16px 20px;
-            border: 2px solid rgba(255,255,255,0.1);
+            padding: 16px;
+            border: 1px solid rgba(255,255,255,0.2);
             border-radius: 12px;
             background: rgba(255,255,255,0.05);
-            color: white;
+            color: #fff;
             font-size: 18px;
             outline: none;
-            transition: all 0.2s;
-            margin-bottom: 16px;
+            transition: border-color 0.2s;
         }
         
-        .form-input:focus {
+        .form-group input:focus {
             border-color: #6366f1;
-            background: rgba(99, 102, 241, 0.1);
         }
         
-        .form-input::placeholder {
+        .form-group input::placeholder {
             color: rgba(255,255,255,0.3);
         }
         
-        /* Access code input - large and prominent */
-        .access-code-input {
-            font-size: 32px;
-            font-weight: 700;
+        .code-input {
+            font-family: monospace;
+            font-size: 32px !important;
             text-align: center;
-            letter-spacing: 8px;
-            font-family: 'SF Mono', Monaco, monospace;
-            padding: 24px;
+            letter-spacing: 0.3em;
         }
         
-        .access-code-hint {
-            color: rgba(255,255,255,0.4);
-            font-size: 14px;
-            margin-top: -8px;
-            margin-bottom: 24px;
-        }
-        
-        /* Buttons */
         .btn {
-            width: 100%;
-            padding: 16px 24px;
+            padding: 16px 32px;
             border: none;
             border-radius: 12px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
-            margin-top: 8px;
+            width: 100%;
         }
         
         .btn-primary {
             background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-            color: white;
+            color: #fff;
         }
         
         .btn-primary:hover {
@@ -491,926 +398,706 @@ PLAYER_HTML = '''
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
-            box-shadow: none;
+        }
+        
+        .error-message {
+            color: #f87171;
+            margin-top: 16px;
+            font-size: 14px;
+        }
+        
+        .connected-info {
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .connected-info h3 {
+            color: #22c55e;
+            margin-bottom: 4px;
         }
         
         .btn-secondary {
             background: rgba(255,255,255,0.1);
-            color: white;
+            color: #fff;
+            margin-top: 12px;
         }
         
         .btn-secondary:hover {
-            background: rgba(255,255,255,0.15);
+            background: rgba(255,255,255,0.2);
         }
         
-        .btn-text {
-            background: none;
-            color: rgba(255,255,255,0.5);
-            padding: 12px;
-        }
-        
-        .btn-text:hover {
-            color: white;
-        }
-        
-        /* Status messages */
-        .status {
-            margin-top: 24px;
-            padding: 16px;
-            border-radius: 12px;
-            text-align: center;
-            display: none;
-            animation: fadeIn 0.3s ease;
-        }
-        
-        .status.error {
-            display: block;
-            background: rgba(239, 68, 68, 0.15);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #fca5a5;
-        }
-        
-        .status.success {
-            display: block;
-            background: rgba(34, 197, 94, 0.15);
-            border: 1px solid rgba(34, 197, 94, 0.3);
-            color: #86efac;
-        }
-        
-        .status.loading {
-            display: block;
-            background: rgba(99, 102, 241, 0.15);
-            border: 1px solid rgba(99, 102, 241, 0.3);
-            color: #a5b4fc;
-        }
-        
-        /* Server discovery */
-        .server-list {
-            margin: 16px 0;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        
-        .server-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 16px;
-            background: rgba(255,255,255,0.05);
-            border: 2px solid transparent;
-            border-radius: 12px;
-            margin-bottom: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-            text-align: left;
-        }
-        
-        .server-item:hover {
-            background: rgba(255,255,255,0.1);
-        }
-        
-        .server-item.selected {
-            border-color: #6366f1;
-            background: rgba(99, 102, 241, 0.1);
-        }
-        
-        .server-icon {
-            width: 40px;
-            height: 40px;
-            background: rgba(99, 102, 241, 0.2);
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .server-info {
-            flex: 1;
-        }
-        
-        .server-name {
-            font-weight: 600;
-            margin-bottom: 2px;
-        }
-        
-        .server-ip {
-            font-size: 13px;
-            color: rgba(255,255,255,0.5);
-            font-family: 'SF Mono', Monaco, monospace;
-        }
-        
-        .divider {
-            display: flex;
-            align-items: center;
-            margin: 24px 0;
-            color: rgba(255,255,255,0.3);
-            font-size: 13px;
-        }
-        
-        .divider::before, .divider::after {
-            content: '';
-            flex: 1;
-            height: 1px;
-            background: rgba(255,255,255,0.1);
-        }
-        
-        .divider::before { margin-right: 16px; }
-        .divider::after { margin-left: 16px; }
-        
-        /* Success state */
-        .success-icon {
-            width: 80px;
-            height: 80px;
-            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 24px;
-            font-size: 40px;
-        }
-        
-        .device-name {
-            font-size: 24px;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }
-        
+        /* Loading spinner */
         .spinner {
-            width: 16px;
-            height: 16px;
-            border: 2px solid rgba(255,255,255,0.3);
-            border-top-color: white;
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #6366f1;
             border-radius: 50%;
-            animation: spin 0.8s linear infinite;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
         }
         
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        
+        /* Status indicator */
+        #status-bar {
+            position: fixed;
+            bottom: 16px;
+            right: 16px;
+            padding: 8px 16px;
+            background: rgba(0,0,0,0.8);
+            border-radius: 8px;
+            font-size: 12px;
+            color: rgba(255,255,255,0.6);
+            z-index: 100;
+            display: none;
+        }
+        
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-online { background: #22c55e; }
+        .status-offline { background: #ef4444; }
+        
+        /* Hidden class */
+        .hidden {
+            display: none !important;
+        }
+        
+        /* Fade transitions */
+        .fade-out {
+            opacity: 0;
+            transition: opacity 0.5s ease-out;
+        }
+        
+        .fade-in {
+            opacity: 1;
+            transition: opacity 0.5s ease-in;
+        }
     </style>
 </head>
 <body>
-    <div id="content-container">
-        <div id="background"></div>
-        <img id="media" style="display: none;">
-        <video id="video" style="display: none;" muted></video>
-        <img id="logo" style="display: none;">
-    </div>
-    
-    <div id="setup-screen">
-        <div class="setup-container">
-            <div class="setup-icon">📺</div>
-            <h1 class="setup-title">Signage Player</h1>
-            <p class="setup-subtitle">Connect to your signage server</p>
-            
-            <div class="steps">
-                <div class="step-dot active" id="step1"></div>
-                <div class="step-dot" id="step2"></div>
+    <div id="player-container">
+        <!-- Content Display -->
+        <div id="content-display" class="hidden"></div>
+        
+        <!-- Splash Screen -->
+        <div id="splash-screen" class="hidden"></div>
+        
+        <!-- Setup Screen -->
+        <div id="setup-screen">
+            <div class="setup-card">
+                <h1>Digital Signage</h1>
+                <p>Connect this display to your signage server</p>
+                
+                <div id="connected-panel" class="hidden">
+                    <div class="connected-info">
+                        <h3>✓ Connected</h3>
+                        <p id="device-name-display"></p>
+                    </div>
+                    <button class="btn btn-primary" onclick="startPlayback()">Start Display</button>
+                    <button class="btn btn-secondary" onclick="disconnect()">Disconnect</button>
+                </div>
+                
+                <div id="connect-panel">
+                    <div class="form-group">
+                        <label>Server URL</label>
+                        <input type="text" id="server-url" placeholder="http://192.168.1.100:8000" />
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Access Code</label>
+                        <input type="text" id="access-code" class="code-input" maxlength="6" placeholder="000000" />
+                    </div>
+                    
+                    <button class="btn btn-primary" id="connect-btn" onclick="connect()">Connect</button>
+                    <p id="error-message" class="error-message hidden"></p>
+                </div>
             </div>
-            
-            <!-- Step 1: Server Connection -->
-            <div class="form-section active" id="section-server">
-                <div id="discovered-servers"></div>
-                
-                <div class="divider">or enter manually</div>
-                
-                <label class="form-label">Server Address</label>
-                <input type="text" id="server-url" class="form-input" placeholder="http://192.168.1.100:8000">
-                
-                <button class="btn btn-primary" onclick="connectToServer()">Continue</button>
-                <button class="btn btn-text" onclick="scanForServers()">🔍 Scan for servers</button>
-                
-                <div id="server-status" class="status"></div>
-            </div>
-            
-            <!-- Step 2: Access Code -->
-            <div class="form-section" id="section-code">
-                <label class="form-label">Enter your 6-digit access code</label>
-                <input type="text" id="access-code" class="form-input access-code-input" 
-                       placeholder="000000" maxlength="6" inputmode="numeric" pattern="[0-9]*">
-                <p class="access-code-hint">Find this code in your server's device settings</p>
-                
-                <button class="btn btn-primary" onclick="registerDevice()" id="btn-register">Connect</button>
-                <button class="btn btn-text" onclick="goToStep(1)">← Back</button>
-                
-                <div id="code-status" class="status"></div>
-            </div>
-            
-            <!-- Success State -->
-            <div class="form-section" id="section-success">
-                <div class="success-icon">✓</div>
-                <p class="device-name" id="connected-device-name">Device Connected</p>
-                <p class="setup-subtitle">Starting playback...</p>
-            </div>
+        </div>
+        
+        <!-- Status bar (debug mode) -->
+        <div id="status-bar">
+            <span class="status-dot status-online"></span>
+            <span id="status-text">Connected</span>
         </div>
     </div>
     
     <script>
-        // State
-        let config = {};
-        let serverUrl = '';
-        let accessCode = '';
+        // Player state
         let playlist = [];
         let currentIndex = 0;
-        let defaultDisplay = null;
-        let syncInterval = null;
-        let advanceTimeout = null;
+        let playbackTimer = null;
+        let pollTimer = null;
+        let orientation = 'landscape';
+        let flipHorizontal = false;
+        let flipVertical = false;
+        let serverUrl = ''; // Will be set from config
+        
+        // DOM elements
+        const setupScreen = document.getElementById('setup-screen');
+        const contentDisplay = document.getElementById('content-display');
+        const splashScreen = document.getElementById('splash-screen');
+        const connectPanel = document.getElementById('connect-panel');
+        const connectedPanel = document.getElementById('connected-panel');
+        const serverUrlInput = document.getElementById('server-url');
+        const accessCodeInput = document.getElementById('access-code');
+        const errorMessage = document.getElementById('error-message');
+        const deviceNameDisplay = document.getElementById('device-name-display');
         
         // Initialize
-        console.log('=== SCRIPT LOADED ===');
-        window.addEventListener('load', () => {
-            console.log('=== WINDOW LOAD EVENT ===');
-            console.log('Window loaded, waiting for pywebview...');
-            // Wait for pywebview API to be ready
-            waitForPywebview().then(() => {
-                console.log('=== PYWEBVIEW READY ===');
-                console.log('pywebview ready, loading config...');
-                loadConfig();
-            });
-            
-            // Auto-format access code input
-            const codeInput = document.getElementById('access-code');
-            codeInput.addEventListener('input', (e) => {
-                e.target.value = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
-                document.getElementById('btn-register').disabled = e.target.value.length !== 6;
-            });
-            
-            // Enter key handlers
-            document.getElementById('server-url').addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') connectToServer();
-            });
-            codeInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter' && e.target.value.length === 6) registerDevice();
-            });
-        });
-        
-        function waitForPywebview() {
-            return new Promise((resolve) => {
-                // Check if API is ready - either via js_api or window.expose
-                function isReady() {
-                    return (window.pywebview && window.pywebview.api && Object.keys(window.pywebview.api).length > 0) 
-                        || typeof window.get_config === 'function';
+        async function init() {
+            log('Initializing player...');
+            try {
+                const config = await pywebview.api.get_config();
+                log('Config loaded: ' + JSON.stringify(config));
+                
+                if (config.server_url) {
+                    serverUrlInput.value = config.server_url;
+                    serverUrl = config.server_url; // Store for later use
                 }
                 
-                if (isReady()) {
-                    resolve();
-                } else {
-                    // Check every 100ms for up to 5 seconds
-                    let attempts = 0;
-                    const interval = setInterval(() => {
-                        attempts++;
-                        if (isReady()) {
-                            clearInterval(interval);
-                            resolve();
-                        } else if (attempts > 50) {
-                            clearInterval(interval);
-                            console.error('pywebview API not available after 5 seconds');
-                            resolve(); // Continue anyway
-                        }
-                    }, 100);
-                }
-            });
-        }
-        
-        // Helper to get API function (works with both js_api and expose)
-        function getApi(name) {
-            return window[name] || (window.pywebview && window.pywebview.api && window.pywebview.api[name]);
-        }
-        
-        function loadConfig() {
-            console.log('loadConfig called');
-            
-            let getConfigFn = getApi('get_config');
-            console.log('get_config function:', getConfigFn);
-            
-            if (getConfigFn) {
-                getConfigFn().then(cfg => {
-                    console.log('Config loaded:', JSON.stringify(cfg));
-                    config = cfg;  // Set config FIRST
-                    document.getElementById('server-url').value = cfg.server_url || '';
+                if (config.is_connected && config.access_code) {
+                    deviceNameDisplay.textContent = config.device_name || 'Device';
+                    connectPanel.classList.add('hidden');
+                    connectedPanel.classList.remove('hidden');
                     
-                    // If already configured with both server and access code, auto-connect
-                    if (cfg.server_url && cfg.access_code) {
-                        console.log('Found saved config, auto-connecting...');
-                        serverUrl = cfg.server_url;
-                        accessCode = cfg.access_code;
-                        autoConnect();
-                    } else {
-                        console.log('No saved config, showing setup...');
-                        showSetupScreen();
-                        scanForServers();
-                    }
-                }).catch(err => {
-                    console.error('Error loading config:', err);
-                    showSetupScreen();
-                    scanForServers();
-                });
-            } else {
-                console.log('No API yet, showing setup...');
-                showSetupScreen();
-                scanForServers();
+                    // Auto-start playback
+                    log('Auto-starting playback...');
+                    setTimeout(() => startPlayback(), 500);
+                } else {
+                    log('Not connected, showing setup screen');
+                }
+            } catch (e) {
+                log('Init error: ' + e.message);
+                console.error('Init error:', e);
             }
         }
         
-        // Called by Python after expose() completes
-        function retryLoadConfig() {
-            console.log('retryLoadConfig called - API should be ready now');
-            loadConfig();
-        }
-        
-        function showSetupScreen() {
-            document.getElementById('setup-screen').classList.add('active');
-            document.getElementById('setup-screen').style.display = 'flex';
-            goToStep(1);
-        }
-        
-        function autoConnect() {
-            console.log('Auto-connecting with config:', JSON.stringify(config));
-            showStatus('server-status', 'Reconnecting...', 'loading');
+        // Connect to server
+        async function connect() {
+            const serverUrlValue = serverUrlInput.value.trim();
+            const accessCode = accessCodeInput.value.trim();
             
-            let syncFn = getApi('sync_content');
-            if (syncFn) {
-                syncFn().then(result => {
-                    console.log('Auto-connect sync result:', JSON.stringify(result));
-                    if (result.success) {
-                        playlist = result.playlist || [];
-                        defaultDisplay = result.default_display;
-                        console.log('Playlist items:', playlist.length);
-                        
-                        // Hide setup screen completely
-                        document.getElementById('setup-screen').style.display = 'none';
-                        document.getElementById('setup-screen').classList.remove('active');
-                        
-                        // Go fullscreen if configured
-                        if (config.fullscreen) {
-                            let toggleFn = getApi('toggle_fullscreen');
-                            if (toggleFn) toggleFn();
-                        }
-                        
-                        startPlayback();
-                        startSyncLoop();
-                    } else {
-                        // Connection failed, show setup
-                        console.error('Auto-connect failed:', result.error);
-                        hideStatus('server-status');
-                        showSetupScreen();
-                        scanForServers();
-                    }
-                }).catch(err => {
-                    console.error('Auto-connect exception:', err);
-                    hideStatus('server-status');
-                    showSetupScreen();
-                    scanForServers();
-                });
-            } else {
-                console.error('No sync_content API available');
-                showSetupScreen();
-            }
-        }
-        
-        function goToStep(step) {
-            document.querySelectorAll('.form-section').forEach(s => s.classList.remove('active'));
-            document.querySelectorAll('.step-dot').forEach(d => d.classList.remove('active', 'complete'));
+            log('Connecting to ' + serverUrlValue + ' with code ' + accessCode);
             
-            if (step === 1) {
-                document.getElementById('section-server').classList.add('active');
-                document.getElementById('step1').classList.add('active');
-            } else if (step === 2) {
-                document.getElementById('section-code').classList.add('active');
-                document.getElementById('step1').classList.add('complete');
-                document.getElementById('step2').classList.add('active');
-                document.getElementById('access-code').focus();
-            } else if (step === 3) {
-                document.getElementById('section-success').classList.add('active');
-                document.getElementById('step1').classList.add('complete');
-                document.getElementById('step2').classList.add('complete');
-            }
-        }
-        
-        function showStatus(id, message, type) {
-            const status = document.getElementById(id);
-            status.textContent = message;
-            status.className = 'status ' + type;
-        }
-        
-        function hideStatus(id) {
-            document.getElementById(id).className = 'status';
-        }
-        
-        function scanForServers() {
-            // In a real implementation, this would scan the network
-            // For now, we'll just check common ports on the local network
-            const container = document.getElementById('discovered-servers');
-            container.innerHTML = '<div class="status loading">Scanning for servers...</div>';
-            
-            let discoverFn = getApi('discover_servers');
-            if (discoverFn) {
-                discoverFn().then(servers => {
-                    if (servers.length === 0) {
-                        container.innerHTML = '';
-                    } else {
-                        let html = '<div class="server-list">';
-                        servers.forEach((server, i) => {
-                            html += `
-                                <div class="server-item" onclick="selectServer('${server.url}', this)">
-                                    <div class="server-icon">🖥️</div>
-                                    <div class="server-info">
-                                        <div class="server-name">${server.name}</div>
-                                        <div class="server-ip">${server.url}</div>
-                                    </div>
-                                </div>
-                            `;
-                        });
-                        html += '</div>';
-                        container.innerHTML = html;
-                    }
-                });
-            } else {
-                container.innerHTML = '';
-            }
-        }
-        
-        function selectServer(url, element) {
-            document.querySelectorAll('.server-item').forEach(s => s.classList.remove('selected'));
-            element.classList.add('selected');
-            document.getElementById('server-url').value = url;
-        }
-        
-        function connectToServer() {
-            serverUrl = document.getElementById('server-url').value.trim();
-            
-            if (!serverUrl) {
-                showStatus('server-status', 'Please enter a server address', 'error');
+            if (!serverUrlValue || !accessCode) {
+                showError('Please enter server URL and access code');
                 return;
             }
             
-            // Ensure URL has protocol
-            if (!serverUrl.startsWith('http://') && !serverUrl.startsWith('https://')) {
-                serverUrl = 'http://' + serverUrl;
-                document.getElementById('server-url').value = serverUrl;
-            }
+            const btn = document.getElementById('connect-btn');
+            btn.disabled = true;
+            btn.textContent = 'Connecting...';
+            hideError();
             
-            showStatus('server-status', 'Connecting...', 'loading');
-            
-            let testFn = getApi('test_server');
-            if (testFn) {
-                testFn(serverUrl).then(result => {
-                    if (result.success) {
-                        hideStatus('server-status');
-                        goToStep(2);
-                    } else {
-                        showStatus('server-status', result.error || 'Could not connect to server', 'error');
-                    }
-                });
-            } else {
-                // For testing without pywebview
-                setTimeout(() => {
-                    hideStatus('server-status');
-                    goToStep(2);
-                }, 1000);
+            try {
+                const result = await pywebview.api.register(serverUrlValue, accessCode);
+                log('Register result: ' + JSON.stringify(result));
+                
+                if (result.success) {
+                    serverUrl = serverUrlValue; // Store for later use
+                    deviceNameDisplay.textContent = result.device_name || 'Device';
+                    connectPanel.classList.add('hidden');
+                    connectedPanel.classList.remove('hidden');
+                } else {
+                    showError(result.error || 'Connection failed');
+                }
+            } catch (e) {
+                log('Connect error: ' + e.message);
+                showError('Connection error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Connect';
             }
         }
         
-        function registerDevice() {
-            accessCode = document.getElementById('access-code').value.trim();
-            
-            if (accessCode.length !== 6) {
-                showStatus('code-status', 'Please enter a 6-digit code', 'error');
-                return;
+        // Disconnect
+        async function disconnect() {
+            try {
+                await pywebview.api.disconnect();
+                stopPlayback();
+                connectedPanel.classList.add('hidden');
+                connectPanel.classList.remove('hidden');
+                setupScreen.classList.remove('hidden');
+                contentDisplay.classList.add('hidden');
+                splashScreen.classList.add('hidden');
+            } catch (e) {
+                console.error('Disconnect error:', e);
             }
-            
-            showStatus('code-status', 'Verifying...', 'loading');
-            
-            let registerFn = getApi('register_device');
-            let saveFn = getApi('save_config');
-            let syncFn = getApi('sync_content');
-            let toggleFn = getApi('toggle_fullscreen');
-            
-            if (registerFn) {
-                registerFn(serverUrl, accessCode).then(result => {
-                    console.log('Register result:', result);
-                    if (result.success) {
-                        document.getElementById('connected-device-name').textContent = result.device_name;
-                        goToStep(3);
-                        
-                        // Save config and start playback
-                        if (saveFn) {
-                            saveFn(serverUrl, accessCode, true).then(() => {
-                                console.log('Config saved, syncing content...');
-                                setTimeout(() => {
-                                    if (syncFn) {
-                                        syncFn().then(syncResult => {
-                                            console.log('Sync result:', syncResult);
-                                            if (syncResult.success) {
-                                                playlist = syncResult.playlist || [];
-                                                defaultDisplay = syncResult.default_display;
-                                                console.log('Playlist items:', playlist.length);
-                                                console.log('Default display:', defaultDisplay);
-                                                
-                                                // Hide setup screen and start
-                                                document.getElementById('setup-screen').style.display = 'none';
-                                                if (toggleFn) toggleFn();
-                                                startPlayback();
-                                                startSyncLoop();
-                                            } else {
-                                                console.error('Sync failed:', syncResult.error);
-                                                showStatus('code-status', 'Sync failed: ' + (syncResult.error || 'Unknown error'), 'error');
-                                                goToStep(2);
-                                            }
-                                        }).catch(err => {
-                                            console.error('Sync exception:', err);
-                                            showStatus('code-status', 'Sync error: ' + err, 'error');
-                                            goToStep(2);
-                                        });
-                                    }
-                                }, 1500);
+        }
+        
+        // Start playback
+        async function startPlayback() {
+            log('Starting playback...');
+            setupScreen.classList.add('hidden');
+            await syncAndPlay();
+            startPolling();
+        }
+        
+        // Sync and start playback
+        async function syncAndPlay() {
+            log('Syncing playlist...');
+            try {
+                const result = await pywebview.api.get_playlist();
+                log('Playlist result: success=' + result.success + ', items=' + (result.playlist?.length || 0));
+                
+                if (result.success) {
+                    playlist = result.playlist || [];
+                    orientation = result.orientation || 'landscape';
+                    flipHorizontal = result.flip_horizontal || false;
+                    flipVertical = result.flip_vertical || false;
+                    
+                    // Capture debug info from server
+                    if (result.debug) {
+                        lastDebugInfo = result.debug;
+                        log('Server debug: schedules=' + result.debug.total_schedules + ', content=' + result.debug.total_content);
+                        if (result.debug.schedule_check_results) {
+                            result.debug.schedule_check_results.forEach(s => {
+                                if (s.selected) {
+                                    log('Active schedule: ' + s.name);
+                                }
                             });
                         }
+                    }
+                    
+                    log('Got ' + playlist.length + ' items, orientation: ' + orientation);
+                    applyOrientation();
+                    
+                    if (playlist.length > 0) {
+                        log('Showing content');
+                        showContent();
                     } else {
-                        showStatus('code-status', result.error || 'Invalid access code', 'error');
+                        log('No playlist items, showing splash screen');
+                        showSplashScreen();
                     }
-                }).catch(err => {
-                    console.error('Register exception:', err);
-                    showStatus('code-status', 'Connection error: ' + err, 'error');
-                });
-            }
-        }
-        
-        function startSyncLoop() {
-            syncInterval = setInterval(() => {
-                let syncFn = getApi('sync_content');
-                if (syncFn) {
-                    syncFn().then(result => {
-                        if (result.success) {
-                            playlist = result.playlist;
-                            defaultDisplay = result.default_display;
-                        }
-                    });
-                }
-            }, 60000);
-        }
-        
-        function startPlayback() {
-            console.log('Starting playback...');
-            console.log('Playlist:', JSON.stringify(playlist));
-            console.log('Default display:', JSON.stringify(defaultDisplay));
-            showContent();
-        }
-        
-        function showContent() {
-            console.log('showContent called, playlist length:', playlist ? playlist.length : 0, 'currentIndex:', currentIndex);
-            
-            const media = document.getElementById('media');
-            const video = document.getElementById('video');
-            const logo = document.getElementById('logo');
-            const background = document.getElementById('background');
-            
-            media.style.display = 'none';
-            video.style.display = 'none';
-            logo.style.display = 'none';
-            
-            if (playlist && playlist.length > 0) {
-                const item = playlist[currentIndex];
-                const localPath = item._local_url || item.local_url;
-                console.log('Showing content:', item.name, 'type:', item.file_type, 'path:', localPath);
-                
-                if (item.file_type === 'video') {
-                    video.src = localPath;
-                    video.style.display = 'block';
-                    video.play().catch(e => console.error('Video play error:', e));
-                    video.onended = () => advance();
-                    video.onerror = (e) => {
-                        console.error('Video error:', e);
-                        advance();
-                    };
                 } else {
-                    media.src = localPath;
-                    media.style.display = 'block';
-                    media.onerror = (e) => {
-                        console.error('Image error:', e, 'src:', localPath);
-                    };
-                    media.onload = () => {
-                        console.log('Image loaded successfully');
-                    };
-                    advanceTimeout = setTimeout(() => advance(), item.display_duration * 1000);
+                    log('Playlist fetch failed: ' + result.error);
+                    showSplashScreen();
                 }
+            } catch (e) {
+                log('Sync error: ' + e.message);
+                console.error('Sync error:', e);
+                showSplashScreen();
+            }
+        }
+        
+        // Apply orientation transforms
+        function applyOrientation() {
+            const container = document.getElementById('player-container');
+            let transform = '';
+            
+            // Note: For portrait mode, the display should already be physically rotated
+            // The flip options handle cases where it's rotated the "wrong way"
+            
+            if (flipHorizontal) {
+                transform += 'scaleX(-1) ';
+            }
+            if (flipVertical) {
+                transform += 'scaleY(-1) ';
+            }
+            
+            container.style.transform = transform.trim() || 'none';
+        }
+        
+        // Show content
+        function showContent() {
+            log('showContent called');
+            splashScreen.classList.add('hidden');
+            contentDisplay.classList.remove('hidden');
+            currentIndex = 0;
+            playCurrentItem();
+        }
+        
+        // Play current item
+        function playCurrentItem() {
+            if (playlist.length === 0) {
+                log('Playlist empty, showing splash');
+                showSplashScreen();
+                return;
+            }
+            
+            const item = playlist[currentIndex];
+            // Build full URL - item.url is relative like /uploads/content/...
+            const fullUrl = serverUrl + item.url;
+            log('Playing item ' + currentIndex + ': ' + item.name + ' (' + item.file_type + ')');
+            log('URL: ' + fullUrl);
+            contentDisplay.innerHTML = '';
+            
+            if (item.file_type === 'video') {
+                const video = document.createElement('video');
+                video.src = fullUrl;
+                video.autoplay = true;
+                video.muted = false;
+                video.playsInline = true;
+                video.style.objectFit = 'contain'; // Show full video
                 
-                background.style.backgroundColor = '#000';
-                background.style.backgroundImage = 'none';
+                video.onloadeddata = () => log('Video loaded: ' + item.name);
+                video.onended = () => {
+                    log('Video ended: ' + item.name);
+                    nextItem();
+                };
+                video.onerror = (e) => {
+                    log('Video error: ' + item.name + ' - ' + (e.message || 'unknown error'));
+                    console.error('Video error:', item.name, e);
+                    setTimeout(() => nextItem(), 1000);
+                };
                 
-            } else if (defaultDisplay) {
-                console.log('Showing default display');
-                if (defaultDisplay.background_mode === 'solid') {
-                    background.style.backgroundColor = defaultDisplay.background_color || '#000';
-                    background.style.backgroundImage = 'none';
-                } else if (defaultDisplay.backgrounds && defaultDisplay.backgrounds.length > 0) {
-                    const bgUrl = defaultDisplay.backgrounds[0]._local_url;
-                    if (bgUrl) {
-                        background.style.backgroundImage = `url('${bgUrl}')`;
-                    }
-                }
-                
-                if (defaultDisplay._local_logo) {
-                    logo.src = defaultDisplay._local_logo;
-                    logo.style.display = 'block';
-                    logo.style.transform = `scale(${defaultDisplay.logo_scale || 0.5})`;
-                }
-                
-                advanceTimeout = setTimeout(() => showContent(), 10000);
+                contentDisplay.appendChild(video);
             } else {
-                console.log('No content or default display, showing black screen');
-                background.style.backgroundColor = '#000';
-                advanceTimeout = setTimeout(() => showContent(), 5000);
+                const img = document.createElement('img');
+                img.src = fullUrl;
+                img.alt = item.name;
+                img.style.objectFit = 'contain'; // Show full image, touch edges
+                
+                img.onload = () => log('Image loaded: ' + item.name);
+                img.onerror = (e) => {
+                    log('Image error: ' + item.name + ' - failed to load from ' + fullUrl);
+                    console.error('Image error:', item.name);
+                    setTimeout(() => nextItem(), 1000);
+                };
+                
+                contentDisplay.appendChild(img);
+                
+                // Use display_duration for images
+                const duration = (item.display_duration || 10) * 1000;
+                log('Image will display for ' + duration + 'ms');
+                playbackTimer = setTimeout(() => nextItem(), duration);
             }
         }
         
-        function advance() {
-            if (advanceTimeout) clearTimeout(advanceTimeout);
-            if (playlist.length > 0) {
-                currentIndex = (currentIndex + 1) % playlist.length;
+        // Next item
+        function nextItem() {
+            if (playbackTimer) {
+                clearTimeout(playbackTimer);
+                playbackTimer = null;
             }
-            showContent();
+            
+            currentIndex = (currentIndex + 1) % playlist.length;
+            log('Next item, index now: ' + currentIndex);
+            playCurrentItem();
         }
         
+        // Show splash screen
+        async function showSplashScreen() {
+            log('Showing splash screen...');
+            contentDisplay.classList.add('hidden');
+            
+            try {
+                const result = await pywebview.api.get_default_display();
+                log('Splash screen result: ' + JSON.stringify(result));
+                
+                if (!result.success || !result.default_display) {
+                    log('No splash config, showing black screen');
+                    splashScreen.innerHTML = '';
+                    splashScreen.style.background = '#000';
+                    splashScreen.classList.remove('hidden');
+                    return;
+                }
+                
+                const display = result.default_display;
+                const serverUrl = result.server_url || '';
+                splashScreen.innerHTML = '';
+                splashScreen.className = 'position-' + (display.logo_position || 'center');
+                
+                log('Splash mode: ' + display.background_mode + ', server: ' + serverUrl);
+                
+                // Background
+                if (display.background_mode === 'solid') {
+                    splashScreen.style.background = display.background_color || '#000';
+                } else if (display.background_mode === 'video' && display.background_video_url) {
+                    const videoUrl = serverUrl + display.background_video_url;
+                    log('Loading background video: ' + videoUrl);
+                    const bgVideo = document.createElement('video');
+                    bgVideo.id = 'splash-background';
+                    bgVideo.src = videoUrl;
+                    bgVideo.autoplay = true;
+                    bgVideo.muted = true;
+                    bgVideo.loop = true;
+                    bgVideo.playsInline = true;
+                    bgVideo.onerror = (e) => log('Background video error: ' + e.message);
+                    bgVideo.onloadeddata = () => log('Background video loaded');
+                    splashScreen.appendChild(bgVideo);
+                    splashScreen.style.background = '#000';
+                } else if (display.background_mode === 'image' && display.backgrounds?.length > 0) {
+                    const imgUrl = serverUrl + display.backgrounds[0].url;
+                    log('Loading background image: ' + imgUrl);
+                    const bgImg = document.createElement('img');
+                    bgImg.id = 'splash-background';
+                    bgImg.src = imgUrl;
+                    bgImg.onerror = () => log('Background image failed to load');
+                    bgImg.onload = () => log('Background image loaded');
+                    splashScreen.appendChild(bgImg);
+                    splashScreen.style.background = '#000';
+                } else if (display.background_mode === 'slideshow' && display.backgrounds?.length > 0) {
+                    const imgUrl = serverUrl + display.backgrounds[0].url;
+                    const bgImg = document.createElement('img');
+                    bgImg.id = 'splash-background';
+                    bgImg.src = imgUrl;
+                    splashScreen.appendChild(bgImg);
+                    splashScreen.style.background = '#000';
+                } else {
+                    splashScreen.style.background = display.background_color || '#000';
+                }
+                
+                // Logo
+                if (display.logo_url) {
+                    const logoUrl = serverUrl + display.logo_url;
+                    log('Loading logo: ' + logoUrl);
+                    const logo = document.createElement('img');
+                    logo.id = 'splash-logo';
+                    logo.src = logoUrl;
+                    logo.style.maxWidth = (display.logo_scale * 100) + '%';
+                    logo.style.maxHeight = (display.logo_scale * 80) + '%';
+                    logo.onerror = () => log('Logo failed to load');
+                    logo.onload = () => log('Logo loaded successfully');
+                    splashScreen.appendChild(logo);
+                }
+                
+                splashScreen.classList.remove('hidden');
+                log('Splash screen displayed');
+                
+            } catch (e) {
+                log('Splash screen error: ' + e.message);
+                console.error('Splash screen error:', e);
+                splashScreen.innerHTML = '';
+                splashScreen.style.background = '#000';
+                splashScreen.classList.remove('hidden');
+            }
+        }
+        
+        // Stop playback
+        function stopPlayback() {
+            if (playbackTimer) {
+                clearTimeout(playbackTimer);
+                playbackTimer = null;
+            }
+            stopPolling();
+        }
+        
+        // Polling for updates
+        function startPolling() {
+            pollTimer = setInterval(async () => {
+                try {
+                    const result = await pywebview.api.get_playlist();
+                    
+                    if (result.success) {
+                        const newPlaylist = result.playlist || [];
+                        const playlistChanged = JSON.stringify(newPlaylist.map(i => i.id)) !== 
+                                                JSON.stringify(playlist.map(i => i.id));
+                        
+                        // Check for orientation changes
+                        const orientationChanged = 
+                            orientation !== result.orientation ||
+                            flipHorizontal !== result.flip_horizontal ||
+                            flipVertical !== result.flip_vertical;
+                        
+                        if (orientationChanged) {
+                            orientation = result.orientation || 'landscape';
+                            flipHorizontal = result.flip_horizontal || false;
+                            flipVertical = result.flip_vertical || false;
+                            applyOrientation();
+                        }
+                        
+                        if (playlistChanged) {
+                            playlist = newPlaylist;
+                            if (playlist.length > 0) {
+                                currentIndex = 0;
+                                showContent();
+                            } else {
+                                showSplashScreen();
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Poll error:', e);
+                }
+            }, 30000); // Poll every 30 seconds
+        }
+        
+        function stopPolling() {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+        }
+        
+        // Error handling
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+        }
+        
+        function hideError() {
+            errorMessage.classList.add('hidden');
+        }
+        
+        // Debug logging
+        let debugMode = false;
+        const debugLog = [];
+        let lastDebugInfo = null;
+        
+        function log(msg) {
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = `[${timestamp}] ${msg}`;
+            debugLog.push(entry);
+            if (debugLog.length > 50) debugLog.shift();
+            console.log(entry);
+            if (debugMode) updateDebugOverlay();
+            try { pywebview.api.log(msg); } catch(e) {}
+        }
+        
+        function updateDebugOverlay() {
+            let overlay = document.getElementById('debug-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'debug-overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.95);color:#0f0;font-family:monospace;font-size:12px;padding:20px;overflow:auto;z-index:9999;white-space:pre-wrap;';
+                document.body.appendChild(overlay);
+            }
+            
+            let debugInfoStr = 'No debug info yet';
+            if (lastDebugInfo) {
+                debugInfoStr = `Server Time: ${lastDebugInfo.current_time}
+Day of Week: ${lastDebugInfo.current_day} (0=Mon, 6=Sun)
+Has Schedule Group: ${lastDebugInfo.has_schedule_group}
+Schedule Group Active: ${lastDebugInfo.schedule_group_active}
+Total Schedules: ${lastDebugInfo.total_schedules}
+Total Content Items: ${lastDebugInfo.total_content}
+Fallback Mode: ${lastDebugInfo.fallback_mode || false}
+
+Schedule Checks:
+${(lastDebugInfo.schedule_check_results || []).map(s => 
+    `  - ${s.name}: ${s.start}-${s.end} days=${s.days} active=${s.is_active} day_match=${s.day_match} time_match=${s.time_match} SELECTED=${s.selected}`
+).join('\n') || '  (none)'}`;
+            }
+            
+            overlay.innerHTML = `<h2 style="color:#0f0;margin-bottom:10px;">DEBUG MODE</h2>
+<div style="color:#888;margin-bottom:10px;">Keys: D=close debug, R=refresh, S=setup screen, ESC=toggle fullscreen</div>
+
+<b style="color:#ff0;">Playlist:</b> ${playlist.length} items
+<b style="color:#ff0;">Current Index:</b> ${currentIndex}
+<b style="color:#ff0;">Orientation:</b> ${orientation} (flip H:${flipHorizontal} V:${flipVertical})
+
+<b style="color:#0ff;">Current Item:</b>
+${playlist[currentIndex] ? JSON.stringify(playlist[currentIndex], null, 2) : 'None - showing splash screen'}
+
+<b style="color:#f0f;">Server Debug Info:</b>
+${debugInfoStr}
+
+<b style="color:#aaa;">Log (last 20):</b>
+${debugLog.slice(-20).join('\n')}`; 
+        }
+        
+        function hideDebugOverlay() {
+            const overlay = document.getElementById('debug-overlay');
+            if (overlay) overlay.remove();
+        }
+        
+        // Keyboard handler
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                let toggleFn = getApi('toggle_fullscreen');
-                if (toggleFn) toggleFn();
-            } else if (e.key === 's' && e.ctrlKey) {
-                document.getElementById('setup-screen').classList.add('active');
-                goToStep(1);
+            // D = Toggle debug overlay
+            if (e.key === 'd' || e.key === 'D') {
+                debugMode = !debugMode;
+                if (debugMode) {
+                    updateDebugOverlay();
+                } else {
+                    hideDebugOverlay();
+                }
+            }
+            // R = Refresh playlist
+            if (e.key === 'r' || e.key === 'R') {
+                log('Manual refresh triggered');
+                syncAndPlay();
+            }
+            // S = Show setup screen
+            if (e.key === 's' || e.key === 'S') {
+                log('Showing setup screen');
+                setupScreen.classList.remove('hidden');
+                contentDisplay.classList.add('hidden');
+                splashScreen.classList.add('hidden');
+            }
+            // Escape - handled by pywebview for fullscreen toggle
+        });
+        
+        // Auto-uppercase access code
+        accessCodeInput.addEventListener('input', (e) => {
+            e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
+        });
+        
+        // Enter key to connect
+        accessCodeInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                connect();
             }
         });
+        
+        // Wait for pywebview API
+        window.addEventListener('pywebviewready', init);
+        
+        // Fallback init
+        setTimeout(() => {
+            if (typeof pywebview !== 'undefined') {
+                init();
+            }
+        }, 1000);
     </script>
 </body>
 </html>
 '''
 
 
-class PlayerAPI:
-    """API exposed to the webview JavaScript"""
-    
-    def __init__(self, player, window=None):
-        self.player = player
-        self.window = window
-    
-    def set_window(self, window):
-        self.window = window
-    
-    def get_config(self):
-        config_dict = dict(self.player.config.__dict__)
-        logger.info(f"get_config called, returning: {config_dict}")
-        return config_dict
-    
-    def save_config(self, server_url, access_code, fullscreen):
-        logger.info(f"save_config called: server_url={server_url}, access_code={access_code}")
-        self.player.config.server_url = server_url
-        self.player.config.access_code = access_code
-        self.player.config.fullscreen = fullscreen
-        self.player.config.save()
-    
-    def discover_servers(self):
-        """Discover signage servers - check localhost first (instant)"""
-        servers = []
-        
-        # Check localhost first - this should be instant
-        for port in [8000, 8080, 5000]:
-            result = self._check_server(f'http://localhost:{port}')
-            if result:
-                servers.append(result)
-                break  # Found localhost, that's probably it
-        
-        # Also check 127.0.0.1 if localhost didn't work
-        if not servers:
-            result = self._check_server('http://127.0.0.1:8000')
-            if result:
-                servers.append(result)
-        
-        return servers
-    
-    def _get_local_ip(self) -> Optional[str]:
-        """Get local IP address"""
-        try:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except:
-            return None
-    
-    def _check_server(self, url: str) -> Optional[Dict]:
-        """Check if a server exists at the given URL"""
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            req = urllib.request.Request(f"{url}/api/discover")
-            with urllib.request.urlopen(req, timeout=0.5, context=ctx) as response:
-                data = json.loads(response.read().decode())
-                return {
-                    'url': url,
-                    'name': data.get('name', 'Signage Server'),
-                    'ip': data.get('ip', url)
-                }
-        except:
-            return None
-    
-    def test_server(self, server_url):
-        """Test connection to a server"""
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            url = f"{server_url.rstrip('/')}/api/discover"
-            req = urllib.request.Request(url)
-            
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
-                data = json.loads(response.read().decode())
-                return {'success': True, 'server_name': data.get('name', 'Signage Server')}
-        except urllib.error.URLError as e:
-            return {'success': False, 'error': f'Cannot reach server: {e.reason}'}
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
-    def register_device(self, server_url, access_code):
-        """Register with a server using access code"""
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            url = f"{server_url.rstrip('/')}/api/player/register"
-            data = urllib.parse.urlencode({'access_code': access_code}).encode()
-            req = urllib.request.Request(url, data=data, method='POST')
-            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
-            
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-                result = json.loads(response.read().decode())
-                
-                # Save to config
-                self.player.config.server_url = server_url
-                self.player.config.access_code = access_code
-                
-                return {
-                    'success': True,
-                    'device_name': result.get('device_name', 'Device'),
-                    'device_id': result.get('device_id')
-                }
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return {'success': False, 'error': 'Invalid access code'}
-            elif e.code == 403:
-                return {'success': False, 'error': 'Device is disabled'}
-            return {'success': False, 'error': f'Server error: {e.code}'}
-        except urllib.error.URLError as e:
-            return {'success': False, 'error': f'Cannot reach server'}
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
-    def sync_content(self):
-        """Sync content and return playlist"""
-        logger.info("sync_content API called")
-        try:
-            success = self.player.sync_content()
-            if success:
-                playlist_data = []
-                for item in self.player.playlist:
-                    # Read file as base64 for display
-                    file_data = None
-                    if item.local_path.exists():
-                        import base64
-                        file_data = base64.b64encode(item.local_path.read_bytes()).decode('utf-8')
-                        mime_type = 'image/jpeg' if item.file_type == 'image' else 'video/mp4'
-                        if item.filename.endswith('.png'):
-                            mime_type = 'image/png'
-                        elif item.filename.endswith('.gif'):
-                            mime_type = 'image/gif'
-                        elif item.filename.endswith('.webp'):
-                            mime_type = 'image/webp'
-                        elif item.filename.endswith('.mp4'):
-                            mime_type = 'video/mp4'
-                        elif item.filename.endswith('.webm'):
-                            mime_type = 'video/webm'
-                        file_data = f"data:{mime_type};base64,{file_data}"
-                    
-                    playlist_data.append({
-                        'id': item.id,
-                        'name': item.name,
-                        'file_type': item.file_type,
-                        'display_duration': item.display_duration,
-                        '_local_url': file_data  # Now a data URL
-                    })
-                
-                # Also convert default display assets to base64
-                default_display = None
-                if self.player.default_display:
-                    default_display = dict(self.player.default_display)
-                    
-                    # Convert logo
-                    if default_display.get('_local_logo'):
-                        logo_path = default_display['_local_logo'].replace('file:///', '').replace('file://', '')
-                        # Handle Windows paths
-                        if logo_path.startswith('/') and len(logo_path) > 2 and logo_path[2] == ':':
-                            logo_path = logo_path[1:]  # Remove leading /
-                        logo_path = Path(logo_path.replace('%20', ' '))
-                        if logo_path.exists():
-                            import base64
-                            logo_data = base64.b64encode(logo_path.read_bytes()).decode('utf-8')
-                            mime = 'image/png' if str(logo_path).endswith('.png') else 'image/jpeg'
-                            default_display['_local_logo'] = f"data:{mime};base64,{logo_data}"
-                
-                logger.info(f"sync_content returning success with {len(playlist_data)} items")
-                return {
-                    'success': True,
-                    'playlist': playlist_data,
-                    'default_display': default_display
-                }
-            else:
-                logger.warning("sync_content: Sync failed")
-                return {'success': False, 'error': 'Sync failed'}
-        except Exception as e:
-            logger.error(f"Sync error: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
-    
-    def toggle_fullscreen(self):
-        """Toggle fullscreen mode"""
-        if self.window:
-            self.window.toggle_fullscreen()
-    
-    def exit_app(self):
-        """Exit the application"""
-        if self.window:
-            self.window.destroy()
-
-
 def main():
     """Main entry point"""
-    try:
-        import webview
-    except ImportError:
-        print("=" * 50)
-        print("ERROR: pywebview is not installed")
-        print("=" * 50)
-        print("\nInstall it with:")
-        print("  pip install pywebview")
-        print("\nOn Linux, you may also need:")
-        print("  sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.0")
-        print("\nOn macOS:")
-        print("  pip install pyobjc")
-        sys.exit(1)
-    
-    # Load config
-    config = Config.load()
-    
-    # Create player
-    player = SignagePlayer(config)
-    
-    # Create API
-    api = PlayerAPI(player)
-    
-    # Create window - frameless for true fullscreen
-    window = webview.create_window(
-        'Signage Player',
-        html=PLAYER_HTML,
-        js_api=api,
-        width=config.window_width,
-        height=config.window_height,
-        resizable=True,
-        frameless=True,
-        easy_drag=False,
-        background_color='#000000',
-        fullscreen=config.fullscreen
-    )
-    
-    api.set_window(window)
+    api = None
     
     def on_loaded():
-        """Called when window is loaded - expose API methods"""
-        logger.info("Window loaded, exposing API methods...")
-        window.expose(api.get_config)
-        window.expose(api.save_config)
-        window.expose(api.discover_servers)
-        window.expose(api.test_server)
-        window.expose(api.register_device)
-        window.expose(api.sync_content)
-        window.expose(api.toggle_fullscreen)
-        window.expose(api.exit_app)
-        logger.info("API methods exposed")
-        # Trigger JS to retry loading config
-        window.evaluate_js('if(typeof retryLoadConfig === "function") retryLoadConfig();')
+        """Called when webview is loaded"""
+        pass
     
-    window.events.loaded += on_loaded
+    # Create window - starts in fullscreen based on config
+    window = webview.create_window(
+        title="Digital Signage Player",
+        html=get_player_html(),
+        width=1280,
+        height=720,
+        fullscreen=config.fullscreen,
+        frameless=False,
+        easy_drag=False,
+        background_color="#000000",
+    )
+    
+    # Create API instance
+    api = PlayerAPI(window)
+    
+    # Expose individual API methods to JavaScript
+    window.expose(
+        api.get_config,
+        api.register,
+        api.disconnect,
+        api.get_playlist,
+        api.get_default_display,
+        api.get_content_url,
+        api.get_screen_info,
+        api.log,
+    )
     
     # Start webview
-    logger.info("Starting webview")
-    webview.start(debug=False)
+    webview.start(
+        on_loaded,
+        debug=config.debug,
+        private_mode=False,
+    )
 
 
 if __name__ == "__main__":

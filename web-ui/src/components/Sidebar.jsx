@@ -3,18 +3,15 @@ import { NavLink } from 'react-router-dom';
 import { 
   LayoutDashboard, 
   Tv, 
-  FolderOpen, 
   Calendar, 
-  Image as ImageIcon,
-  Settings
+  Image as ImageIcon
 } from 'lucide-react';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/devices', icon: Tv, label: 'Devices' },
-  { to: '/content', icon: FolderOpen, label: 'Content' },
   { to: '/schedules', icon: Calendar, label: 'Schedules' },
-  { to: '/display-settings', icon: ImageIcon, label: 'Default Display' },
+  { to: '/splash-screen', icon: ImageIcon, label: 'Splash Screen' },
 ];
 
 export default function Sidebar() {

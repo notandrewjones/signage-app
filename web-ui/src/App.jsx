@@ -4,11 +4,9 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
-import ContentGroups from './pages/ContentGroups';
-import ContentGroupDetail from './pages/ContentGroupDetail';
 import ScheduleGroups from './pages/ScheduleGroups';
 import ScheduleGroupDetail from './pages/ScheduleGroupDetail';
-import DisplaySettings from './pages/DisplaySettings';
+import SplashScreen from './pages/SplashScreen';
 
 export default function App() {
   return (
@@ -20,11 +18,9 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/devices/:id" element={<DeviceDetail />} />
-            <Route path="/content" element={<ContentGroups />} />
-            <Route path="/content/:id" element={<ContentGroupDetail />} />
             <Route path="/schedules" element={<ScheduleGroups />} />
             <Route path="/schedules/:id" element={<ScheduleGroupDetail />} />
-            <Route path="/display-settings" element={<DisplaySettings />} />
+            <Route path="/splash-screen" element={<SplashScreen />} />
           </Routes>
         </div>
       </main>
