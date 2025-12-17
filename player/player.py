@@ -548,49 +548,53 @@ function getUrl(item) {
 }
 
 // ============================================================
-// NTP-STYLE TIME SYNCHRONIZATION
+// DIRECT HTTP TIME SYNCHRONIZATION
+// JavaScript fetches time directly from server - no pywebview bridge
 // ============================================================
 
-// Perform multiple time sync measurements and use the best one
 async function performTimeSync() {
-    log('Performing NTP-style time sync...');
+    log('Performing direct HTTP time sync...');
     const measurements = [];
-    const NUM_SAMPLES = 5;
+    const NUM_SAMPLES = 7;
     
     for (let i = 0; i < NUM_SAMPLES; i++) {
         try {
-            const result = await pywebview.api.time_sync();
-            if (result.success) {
-                // NTP-style calculation:
-                // t1 = client send time
-                // t2 = server receive time (server_time)
-                // t3 = server send time (same as t2 for our simple case)
-                // t4 = client receive time
-                // offset = ((t2 - t1) + (t3 - t4)) / 2
-                // roundtrip = (t4 - t1) - (t3 - t2)
-                
-                const t1 = result.client_send_time;
-                const t2 = result.server_time;
-                const t4 = Date.now() / 1000;
-                
-                const roundTrip = t4 - t1;
-                const offset = t2 - t1 - (roundTrip / 2);
-                
-                measurements.push({
-                    offset: offset,
-                    roundTrip: roundTrip,
-                    latency: roundTrip / 2
-                });
-                
-                log(`Sync sample ${i+1}: offset=${offset.toFixed(4)}s, RTT=${(roundTrip*1000).toFixed(1)}ms`);
-            }
+            const t1 = performance.now();  // High-resolution local time
+            const localT1 = Date.now();    // Wall clock at send
+            
+            const response = await fetch(serverUrl + '/api/time', {
+                method: 'GET',
+                cache: 'no-store'  // Prevent caching
+            });
+            
+            const t4 = performance.now();  // High-resolution local time at receive
+            const data = await response.json();
+            const serverTime = data.time;  // Server timestamp
+            
+            // NTP-style calculation
+            const roundTrip = (t4 - t1) / 1000;  // Convert to seconds
+            const oneWayLatency = roundTrip / 2;
+            
+            // Server time was captured at approximately t1 + oneWayLatency
+            // So offset = serverTime - (localT1/1000 + oneWayLatency)
+            const localTimeAtServerCapture = localT1 / 1000 + oneWayLatency;
+            const offset = serverTime - localTimeAtServerCapture;
+            
+            measurements.push({
+                offset: offset,
+                roundTrip: roundTrip,
+                latency: oneWayLatency
+            });
+            
+            log(`Time sample ${i+1}: offset=${(offset*1000).toFixed(1)}ms, RTT=${(roundTrip*1000).toFixed(1)}ms`);
+            
         } catch (e) {
-            log(`Sync sample ${i+1} failed: ${e.message}`);
+            log(`Time sample ${i+1} failed: ${e.message}`);
         }
         
         // Small delay between samples
         if (i < NUM_SAMPLES - 1) {
-            await new Promise(r => setTimeout(r, 50));
+            await new Promise(r => setTimeout(r, 100));
         }
     }
     
@@ -599,20 +603,43 @@ async function performTimeSync() {
         return 0;
     }
     
-    // Sort by round trip time and take the measurement with lowest latency
-    // (lowest latency = most accurate offset measurement)
+    // Sort by round trip time - lowest RTT = most accurate
     measurements.sort((a, b) => a.roundTrip - b.roundTrip);
-    const best = measurements[0];
     
-    log(`Best sync: offset=${best.offset.toFixed(4)}s, latency=${(best.latency*1000).toFixed(1)}ms`);
+    // Take median of the best 3 measurements for stability
+    const bestMeasurements = measurements.slice(0, Math.min(3, measurements.length));
+    const avgOffset = bestMeasurements.reduce((sum, m) => sum + m.offset, 0) / bestMeasurements.length;
     
-    // Also calculate median for comparison
-    const medianIdx = Math.floor(measurements.length / 2);
-    const median = measurements[medianIdx];
-    log(`Median sync: offset=${median.offset.toFixed(4)}s`);
+    log(`SYNC RESULT: offset=${(avgOffset*1000).toFixed(1)}ms (best RTT=${(measurements[0].roundTrip*1000).toFixed(1)}ms)`);
     
-    // Use best (lowest latency) measurement
-    return best.offset;
+    return avgOffset;
+}
+
+// Get current server time (local time adjusted by offset)
+function getServerTime() {
+    return (Date.now() / 1000) + serverTimeOffset;
+}
+
+// Start periodic time resync
+let timeSyncInterval = null;
+function startTimeSyncLoop() {
+    // Sync every 30 seconds to maintain accuracy
+    if (timeSyncInterval) clearInterval(timeSyncInterval);
+    timeSyncInterval = setInterval(async () => {
+        const newOffset = await performTimeSync();
+        const drift = Math.abs(newOffset - serverTimeOffset);
+        if (drift > 0.02) {  // Only update if drift > 20ms
+            log(`Time drift detected: ${(drift*1000).toFixed(1)}ms - updating offset`);
+            serverTimeOffset = newOffset;
+        }
+    }, 30000);
+}
+
+function stopTimeSyncLoop() {
+    if (timeSyncInterval) {
+        clearInterval(timeSyncInterval);
+        timeSyncInterval = null;
+    }
 }
 
 // ============================================================
@@ -793,6 +820,9 @@ async function startSyncedPlayback() {
     log('Starting synchronized playback');
     splashScreen.classList.add('hidden');
     contentDisplay.classList.remove('hidden');
+    
+    // Start periodic time resync to maintain accuracy
+    startTimeSyncLoop();
     
     // Calculate current position in the cycle
     const position = getCurrentCyclePosition();
@@ -988,9 +1018,6 @@ async function doSyncedTransition() {
 // SYNC MONITORING & CORRECTION
 // ============================================================
 
-let lastTimeRecalibration = 0;
-const TIME_RECALIBRATION_INTERVAL = 60000; // Re-sync clocks every 60 seconds
-
 function startSyncLoop() {
     if (syncCheckInterval) clearInterval(syncCheckInterval);
     
@@ -998,18 +1025,7 @@ function startSyncLoop() {
     syncCheckInterval = setInterval(() => checkAndCorrectSync(), 1000);
 }
 
-async function checkAndCorrectSync() {
-    // Periodically recalibrate time offset
-    const now = Date.now();
-    if (now - lastTimeRecalibration > TIME_RECALIBRATION_INTERVAL) {
-        lastTimeRecalibration = now;
-        const newOffset = await performTimeSync();
-        if (Math.abs(newOffset - serverTimeOffset) > 0.05) {  // Only update if drift > 50ms
-            log(`Time recalibration: offset changed from ${serverTimeOffset.toFixed(4)} to ${newOffset.toFixed(4)}`);
-            serverTimeOffset = newOffset;
-        }
-    }
-    
+function checkAndCorrectSync() {
     const position = getCurrentCyclePosition();
     const { index, elapsed } = getItemAtPosition(position);
     
@@ -1020,12 +1036,12 @@ async function checkAndCorrectSync() {
         return;
     }
     
-    // Check video timing drift - tighter threshold of 100ms
+    // Check video timing drift - tighter threshold of 50ms
     const currentLayer = contentLayers[activeLayer];
     const video = currentLayer.querySelector('video');
     if (video && playlist[currentIndex]?.file_type === 'video') {
         const drift = Math.abs(video.currentTime - elapsed);
-        if (drift > 0.1) {  // More than 100ms drift
+        if (drift > 0.05) {  // More than 50ms drift
             log(`VIDEO DRIFT: ${(drift*1000).toFixed(0)}ms - correcting`);
             video.currentTime = elapsed;
         }
@@ -1075,7 +1091,7 @@ function startPolling() {
                 log('Server sync time changed - full resync');
                 syncStartTime = r.sync.start_time;
                 totalCycleDuration = r.sync.total_duration;
-                serverTimeOffset = r.sync.server_time - (Date.now() / 1000);
+                // Don't overwrite serverTimeOffset - it's managed by the time sync loop
                 
                 playlist = r.playlist || [];
                 calculateItemStartTimes();
@@ -1113,6 +1129,7 @@ function stopPlayback() {
     if (playbackTimer) { clearTimeout(playbackTimer); playbackTimer = null; }
     if (syncCheckInterval) { clearInterval(syncCheckInterval); syncCheckInterval = null; }
     stopPolling();
+    stopTimeSyncLoop();
     contentLayers.forEach(l => {
         const v = l.querySelector('video');
         if (v) v.pause();
