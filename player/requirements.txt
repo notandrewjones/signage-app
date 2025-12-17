@@ -1,0 +1,8 @@
+# Core dependencies (minimal for lightweight devices)
+# websockets is optional for real-time updates
+
+# Optional for real-time sync:
+# websockets>=12.0
+
+# For video playback on desktop:
+# python-vlc
