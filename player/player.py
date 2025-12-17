@@ -548,43 +548,70 @@ function getUrl(item) {
 }
 
 // ============================================================
-// DIRECT HTTP TIME SYNCHRONIZATION
-// Simplified: just verify clocks are close, use local time
+// ROBUST TIME SYNCHRONIZATION
+// Takes multiple samples, filters outliers, uses median
 // ============================================================
 
 async function performTimeSync() {
-    log('Checking time sync with server...');
+    log('Performing robust time sync...');
+    const samples = [];
+    const NUM_SAMPLES = 15;  // More samples for better accuracy
     
-    try {
-        const localBefore = Date.now() / 1000;
-        
-        const response = await fetch(serverUrl + '/api/time', {
-            method: 'GET',
-            cache: 'no-store'
-        });
-        
-        const localAfter = Date.now() / 1000;
-        const data = await response.json();
-        const serverTime = data.time;
-        
-        // Calculate approximate offset (for display/debugging only)
-        const roundTrip = localAfter - localBefore;
-        const localMidpoint = (localBefore + localAfter) / 2;
-        const offset = serverTime - localMidpoint;
-        
-        log(`Server time: ${serverTime.toFixed(3)}, Local: ${localMidpoint.toFixed(3)}, Offset: ${(offset*1000).toFixed(0)}ms, RTT: ${(roundTrip*1000).toFixed(0)}ms`);
-        
-        // Warn if clocks are way off
-        if (Math.abs(offset) > 1) {
-            log(`WARNING: Device clock is ${offset.toFixed(1)}s off from server!`);
+    for (let i = 0; i < NUM_SAMPLES; i++) {
+        try {
+            const t1 = Date.now();
+            
+            const response = await fetch(serverUrl + '/api/time', {
+                method: 'GET',
+                cache: 'no-store'
+            });
+            
+            const t4 = Date.now();
+            const data = await response.json();
+            const serverTimeMs = data.time * 1000;  // Convert to ms for precision
+            
+            const roundTrip = t4 - t1;
+            const localMidpoint = (t1 + t4) / 2;
+            const offset = serverTimeMs - localMidpoint;
+            
+            samples.push({ offset, roundTrip });
+            
+        } catch (e) {
+            // Skip failed samples
         }
         
-        return offset;
-        
-    } catch (e) {
-        log(`Time sync failed: ${e.message}`);
-        return 0;
+        // Small delay between samples
+        await new Promise(r => setTimeout(r, 50));
     }
+    
+    if (samples.length < 3) {
+        log('Time sync failed - not enough samples');
+        return serverTimeOffset;  // Keep existing offset
+    }
+    
+    // Sort by round trip time
+    samples.sort((a, b) => a.roundTrip - b.roundTrip);
+    
+    // Take only the fastest 50% of samples (lower RTT = more accurate)
+    const bestSamples = samples.slice(0, Math.ceil(samples.length / 2));
+    
+    // Sort by offset and take the median
+    bestSamples.sort((a, b) => a.offset - b.offset);
+    const medianIndex = Math.floor(bestSamples.length / 2);
+    const medianOffset = bestSamples[medianIndex].offset;
+    
+    // Convert back to seconds
+    const offsetSeconds = medianOffset / 1000;
+    
+    // Calculate stats for logging
+    const offsets = bestSamples.map(s => s.offset);
+    const minOffset = Math.min(...offsets);
+    const maxOffset = Math.max(...offsets);
+    const spread = maxOffset - minOffset;
+    
+    log(`Sync: ${samples.length} samples, best ${bestSamples.length}, median offset: ${medianOffset.toFixed(0)}ms, spread: ${spread.toFixed(0)}ms`);
+    
+    return offsetSeconds;
 }
 
 // Get current time for sync calculations
@@ -924,9 +951,10 @@ function transitionLoop(timestamp) {
     
     if (remaining <= 0.008) {  // Within 8ms (half a frame) - fire now
         rafId = null;
-        const actualFiringTime = getServerTime();
-        const drift = (actualFiringTime - transitionTargetTime) * 1000;
-        log(`>>> TRANSITION FIRED at ${actualFiringTime.toFixed(3)}, target was ${transitionTargetTime.toFixed(3)}, drift: ${drift.toFixed(1)}ms`);
+        const localNow = Date.now();
+        const adjustedNow = getServerTime();
+        const drift = (adjustedNow - transitionTargetTime) * 1000;
+        log(`>>> FIRED: local=${localNow}, adjusted=${adjustedNow.toFixed(3)}, target=${transitionTargetTime.toFixed(3)}, drift=${drift.toFixed(0)}ms, offset=${(serverTimeOffset*1000).toFixed(0)}ms`);
         doSyncedTransition();
     } else {
         // Keep looping
