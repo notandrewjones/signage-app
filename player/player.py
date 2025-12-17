@@ -972,13 +972,7 @@ function stopTransitionLoop() {
 async function doSyncedTransition() {
     stopTransitionLoop();
     
-    // Stop current video
-    const currentLayer = contentLayers[activeLayer];
-    const video = currentLayer.querySelector('video');
-    if (video) {
-        video.pause();
-        video.onended = null;
-    }
+    const transitionStartTime = Date.now();
     
     // Calculate what should be playing NOW
     const position = getCurrentCyclePosition();
@@ -987,37 +981,44 @@ async function doSyncedTransition() {
     currentIndex = index;
     const nextLayer = 1 - activeLayer;
     
-    log(`Transition to item ${currentIndex} "${playlist[currentIndex]?.name}"`);
-    updateSyncIndicator('synced', `Item ${currentIndex+1}/${playlist.length}`);
-    
-    // If the preloaded item doesn't match, reload
-    const preloadedForNext = (currentIndex === (activeLayer === 0 ? 1 : 0));
-    if (!preloadedForNext) {
-        await preload(currentIndex, nextLayer);
-    }
-    
-    // Perform transition
     const newLayer = contentLayers[nextLayer];
     const oldLayer = contentLayers[activeLayer];
     
+    // IMMEDIATELY perform the visual transition - this is the critical sync point
     newLayer.style.zIndex = '2';
     newLayer.classList.add('active');
+    oldLayer.style.zIndex = '1';
+    oldLayer.classList.remove('active');
     
-    const transTime = transitionType === 'dissolve' ? transitionDuration * 1000 : 0;
+    const visualChangeTime = Date.now();
+    log(`Visual change at local=${visualChangeTime}, took ${visualChangeTime - transitionStartTime}ms from FIRED`);
     
-    setTimeout(async () => {
-        oldLayer.style.zIndex = '1';
-        oldLayer.classList.remove('active');
-        
-        // Preload the next-next item
-        const preloadIndex = (currentIndex + 1) % playlist.length;
-        preload(preloadIndex, activeLayer);
-        
-        activeLayer = nextLayer;
-        
-        // Show the item (will seek video if needed)
-        showSyncedItem(elapsed);
-    }, transTime + 50);
+    // Stop current video (after visual change)
+    const video = oldLayer.querySelector('video');
+    if (video) {
+        video.pause();
+        video.onended = null;
+    }
+    
+    // Update state
+    activeLayer = nextLayer;
+    
+    log(`Transition to item ${currentIndex} "${playlist[currentIndex]?.name}"`);
+    updateSyncIndicator('synced', `Item ${currentIndex+1}/${playlist.length}`);
+    
+    // Handle video seeking if needed (for videos)
+    const newVideo = newLayer.querySelector('video');
+    if (newVideo && playlist[currentIndex]?.file_type === 'video') {
+        newVideo.currentTime = elapsed;
+        newVideo.play().catch(e => log('Video play error: ' + e.message));
+    }
+    
+    // Preload next item in background (non-blocking)
+    const preloadIndex = (currentIndex + 1) % playlist.length;
+    preload(preloadIndex, 1 - activeLayer);
+    
+    // Schedule next transition
+    scheduleNextTransition();
 }
 
 // ============================================================
