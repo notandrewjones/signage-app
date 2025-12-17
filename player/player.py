@@ -387,6 +387,23 @@ class PlayerAPI:
     def get_screen_info(self):
         return {"width": 1920, "height": 1080}
     
+    def time_sync(self):
+        """NTP-style time synchronization - returns server time and round-trip info"""
+        if not config.access_code:
+            return {"success": False, "error": "Not connected"}
+        try:
+            client_send_time = time.time()
+            req = urllib.request.Request(f"{config.server_url}/api/time")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                result = json.loads(response.read())
+                return {
+                    "success": True,
+                    "server_time": result.get("time"),
+                    "client_send_time": client_send_time,
+                }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     def log(self, message):
         print(f"[JS] {message}")
 
@@ -531,6 +548,74 @@ function getUrl(item) {
 }
 
 // ============================================================
+// NTP-STYLE TIME SYNCHRONIZATION
+// ============================================================
+
+// Perform multiple time sync measurements and use the best one
+async function performTimeSync() {
+    log('Performing NTP-style time sync...');
+    const measurements = [];
+    const NUM_SAMPLES = 5;
+    
+    for (let i = 0; i < NUM_SAMPLES; i++) {
+        try {
+            const result = await pywebview.api.time_sync();
+            if (result.success) {
+                // NTP-style calculation:
+                // t1 = client send time
+                // t2 = server receive time (server_time)
+                // t3 = server send time (same as t2 for our simple case)
+                // t4 = client receive time
+                // offset = ((t2 - t1) + (t3 - t4)) / 2
+                // roundtrip = (t4 - t1) - (t3 - t2)
+                
+                const t1 = result.client_send_time;
+                const t2 = result.server_time;
+                const t4 = Date.now() / 1000;
+                
+                const roundTrip = t4 - t1;
+                const offset = t2 - t1 - (roundTrip / 2);
+                
+                measurements.push({
+                    offset: offset,
+                    roundTrip: roundTrip,
+                    latency: roundTrip / 2
+                });
+                
+                log(`Sync sample ${i+1}: offset=${offset.toFixed(4)}s, RTT=${(roundTrip*1000).toFixed(1)}ms`);
+            }
+        } catch (e) {
+            log(`Sync sample ${i+1} failed: ${e.message}`);
+        }
+        
+        // Small delay between samples
+        if (i < NUM_SAMPLES - 1) {
+            await new Promise(r => setTimeout(r, 50));
+        }
+    }
+    
+    if (measurements.length === 0) {
+        log('Time sync failed - no valid samples');
+        return 0;
+    }
+    
+    // Sort by round trip time and take the measurement with lowest latency
+    // (lowest latency = most accurate offset measurement)
+    measurements.sort((a, b) => a.roundTrip - b.roundTrip);
+    const best = measurements[0];
+    
+    log(`Best sync: offset=${best.offset.toFixed(4)}s, latency=${(best.latency*1000).toFixed(1)}ms`);
+    
+    // Also calculate median for comparison
+    const medianIdx = Math.floor(measurements.length / 2);
+    const median = measurements[medianIdx];
+    log(`Median sync: offset=${median.offset.toFixed(4)}s`);
+    
+    // Use best (lowest latency) measurement
+    return best.offset;
+}
+
+// ============================================================
 // SYNC CALCULATION FUNCTIONS
 // ============================================================
 
@@ -653,6 +738,9 @@ async function syncAndPlay() {
     updateSyncIndicator('syncing', 'Syncing...');
     
     try {
+        // First, perform accurate NTP-style time synchronization
+        serverTimeOffset = await performTimeSync();
+        
         const r = await pywebview.api.get_playlist();
         
         if (!r.success) {
@@ -673,8 +761,7 @@ async function syncAndPlay() {
         if (r.sync) {
             syncStartTime = r.sync.start_time || 0;
             totalCycleDuration = r.sync.total_duration || 0;
-            serverTimeOffset = (r.sync.server_time || (Date.now()/1000)) - (Date.now() / 1000);
-            log(`Sync info: start=${syncStartTime.toFixed(0)}, cycle=${totalCycleDuration.toFixed(1)}s, offset=${serverTimeOffset.toFixed(3)}s`);
+            log(`Sync info: start=${syncStartTime.toFixed(0)}, cycle=${totalCycleDuration.toFixed(1)}s, offset=${serverTimeOffset.toFixed(4)}s`);
         }
         
         applyOrientation();
@@ -853,14 +940,28 @@ async function doSyncedTransition() {
 // SYNC MONITORING & CORRECTION
 // ============================================================
 
+let lastTimeRecalibration = 0;
+const TIME_RECALIBRATION_INTERVAL = 60000; // Re-sync clocks every 60 seconds
+
 function startSyncLoop() {
     if (syncCheckInterval) clearInterval(syncCheckInterval);
     
-    // Check sync every 3 seconds
-    syncCheckInterval = setInterval(() => checkAndCorrectSync(), 3000);
+    // Check sync every second for tighter accuracy
+    syncCheckInterval = setInterval(() => checkAndCorrectSync(), 1000);
 }
 
-function checkAndCorrectSync() {
+async function checkAndCorrectSync() {
+    // Periodically recalibrate time offset
+    const now = Date.now();
+    if (now - lastTimeRecalibration > TIME_RECALIBRATION_INTERVAL) {
+        lastTimeRecalibration = now;
+        const newOffset = await performTimeSync();
+        if (Math.abs(newOffset - serverTimeOffset) > 0.05) {  // Only update if drift > 50ms
+            log(`Time recalibration: offset changed from ${serverTimeOffset.toFixed(4)} to ${newOffset.toFixed(4)}`);
+            serverTimeOffset = newOffset;
+        }
+    }
+    
     const position = getCurrentCyclePosition();
     const { index, elapsed } = getItemAtPosition(position);
     
@@ -871,13 +972,13 @@ function checkAndCorrectSync() {
         return;
     }
     
-    // Check video timing drift
+    // Check video timing drift - tighter threshold of 100ms
     const currentLayer = contentLayers[activeLayer];
     const video = currentLayer.querySelector('video');
     if (video && playlist[currentIndex]?.file_type === 'video') {
         const drift = Math.abs(video.currentTime - elapsed);
-        if (drift > 0.5) {  // More than 0.5 second drift
-            log(`VIDEO DRIFT: ${drift.toFixed(2)}s - correcting`);
+        if (drift > 0.1) {  // More than 100ms drift
+            log(`VIDEO DRIFT: ${(drift*1000).toFixed(0)}ms - correcting`);
             video.currentTime = elapsed;
         }
     }
@@ -891,6 +992,9 @@ async function resync() {
         clearTimeout(playbackTimer);
         playbackTimer = null;
     }
+    
+    // Recalibrate time before resync
+    serverTimeOffset = await performTimeSync();
     
     const position = getCurrentCyclePosition();
     const { index, elapsed } = getItemAtPosition(position);
@@ -1058,16 +1162,25 @@ function updateDebug() {
     const pos = getCurrentCyclePosition();
     const { index, elapsed, remaining } = getItemAtPosition(pos);
     
+    // Get video drift if applicable
+    let videoDrift = 'N/A';
+    const currentLayer = contentLayers[activeLayer];
+    const video = currentLayer?.querySelector('video');
+    if (video && item?.file_type === 'video') {
+        videoDrift = ((video.currentTime - elapsed) * 1000).toFixed(0) + 'ms';
+    }
+    
     o.innerHTML = `<b>SYNC DEBUG (D=close R=resync S=setup)</b>
 
 Sync Start: ${new Date(syncStartTime * 1000).toLocaleTimeString()}
 Cycle Duration: ${totalCycleDuration.toFixed(1)}s
-Server Offset: ${serverTimeOffset.toFixed(3)}s
-Current Position: ${pos.toFixed(2)}s
+Server Offset: ${(serverTimeOffset * 1000).toFixed(1)}ms
+Current Position: ${pos.toFixed(3)}s
 
 Playlist: ${playlist.length} items
 Current Item: ${currentIndex} "${item?.name || 'N/A'}"
-Should Be: ${index} (${elapsed.toFixed(1)}s in, ${remaining.toFixed(1)}s left)
+Should Be: ${index} (${elapsed.toFixed(3)}s in, ${remaining.toFixed(3)}s left)
+Video Drift: ${videoDrift}
 Active Layer: ${activeLayer}
 Transition: ${transitionType} (${transitionDuration}s)
 
@@ -1125,6 +1238,7 @@ def main():
         api.get_local_file_url,
         api.get_sync_status,
         api.get_screen_info,
+        api.time_sync,
         api.log,
     )
     

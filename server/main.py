@@ -9,7 +9,7 @@ import random
 import asyncio
 import hashlib
 import socket
-import time
+import time as time_module
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -409,7 +409,7 @@ async def upload_content(
     db.add(item)
     
     # RESET SYNC TIME when content changes - all devices will resync
-    group.sync_start_time = time.time()
+    group.sync_start_time = time_module.time()
     
     db.commit()
     db.refresh(item)
@@ -460,7 +460,7 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
     
     # RESET SYNC TIME when content changes
     if group:
-        group.sync_start_time = time.time()
+        group.sync_start_time = time_module.time()
     
     db.commit()
     
@@ -486,7 +486,7 @@ async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depe
     
     # RESET SYNC TIME when order changes
     if group:
-        group.sync_start_time = time.time()
+        group.sync_start_time = time_module.time()
     
     db.commit()
     
@@ -951,7 +951,7 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
         
         # Initialize sync_start_time if not set and we have content
         if sync_start_time == 0.0 and len(playlist) > 0:
-            sync_start_time = time.time()
+            sync_start_time = time_module.time()
             device.schedule_group.sync_start_time = sync_start_time
     
     db.commit()
@@ -981,7 +981,7 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
         "sync": {
             "start_time": sync_start_time,       # Unix timestamp when cycle started
             "total_duration": total_cycle_duration,  # Total playlist cycle in seconds
-            "server_time": time.time(),          # Current server time for clock sync
+            "server_time": time_module.time(),          # Current server time for clock sync
         },
         "server_time": datetime.utcnow().isoformat(),
     }
@@ -1041,6 +1041,14 @@ def get_stats(db: Session = Depends(get_db)):
 def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+# ============== Time Sync (NTP-style) ==============
+
+@app.get("/api/time")
+def get_server_time():
+    """Lightweight endpoint for NTP-style time synchronization.
+    Returns server time as Unix timestamp with high precision."""
+    return {"time": time_module.time()}
+
 
 if __name__ == "__main__":
     import uvicorn
@@ -1056,7 +1064,7 @@ async def reset_sync_timing(group_id: int, db: Session = Depends(get_db)):
     if not group:
         raise HTTPException(status_code=404, detail="Schedule group not found")
     
-    group.sync_start_time = time.time()
+    group.sync_start_time = time_module.time()
     db.commit()
     
     # Notify all connected devices to resync immediately
