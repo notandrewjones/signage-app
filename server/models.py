@@ -35,6 +35,10 @@ class ScheduleGroup(Base):
     transition_type = Column(String(20), default='cut')  # 'cut' or 'dissolve'
     transition_duration = Column(Float, default=0.5)  # seconds (0.1 - 3.0)
     
+    # SYNC: Unix timestamp when the playlist cycle started
+    # All devices use this to calculate their current position
+    sync_start_time = Column(Float, default=0.0)
+    
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     

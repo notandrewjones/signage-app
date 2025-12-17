@@ -9,6 +9,7 @@ import random
 import asyncio
 import hashlib
 import socket
+import time
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -216,7 +217,7 @@ def serialize_content_item(item: ContentItem) -> dict:
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
-def serialize_schedule_group(group: ScheduleGroup) -> dict:
+def serialize_schedule_group(group) -> dict:
     return {
         "id": group.id,
         "name": group.name,
@@ -225,6 +226,7 @@ def serialize_schedule_group(group: ScheduleGroup) -> dict:
         "is_active": group.is_active,
         "transition_type": group.transition_type or "cut",
         "transition_duration": group.transition_duration or 0.5,
+        "sync_start_time": group.sync_start_time or 0.0,  # NEW FIELD
         "content_count": len(group.content_items) if group.content_items else 0,
         "schedule_count": len(group.schedules) if group.schedules else 0,
         "device_count": len(group.devices) if group.devices else 0,
@@ -405,6 +407,10 @@ async def upload_content(
         schedule_group_id=group_id,
     )
     db.add(item)
+    
+    # RESET SYNC TIME when content changes - all devices will resync
+    group.sync_start_time = time.time()
+    
     db.commit()
     db.refresh(item)
     
@@ -412,6 +418,7 @@ async def upload_content(
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
+        "sync_start_time": group.sync_start_time,
     })
     
     return serialize_content_item(item)
@@ -442,6 +449,7 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Content item not found")
     
     group_id = item.schedule_group_id
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
     
     # Delete file
     file_path = CONTENT_DIR / item.filename
@@ -449,17 +457,25 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
         file_path.unlink()
     
     db.delete(item)
+    
+    # RESET SYNC TIME when content changes
+    if group:
+        group.sync_start_time = time.time()
+    
     db.commit()
     
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
+        "sync_start_time": group.sync_start_time if group else 0,
     })
     
     return {"status": "deleted"}
 
 @app.post("/api/schedule-groups/{group_id}/reorder")
 async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depends(get_db)):
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
+    
     for order, item_id in enumerate(item_ids):
         item = db.query(ContentItem).filter(
             ContentItem.id == item_id,
@@ -468,11 +484,16 @@ async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depe
         if item:
             item.order = order
     
+    # RESET SYNC TIME when order changes
+    if group:
+        group.sync_start_time = time.time()
+    
     db.commit()
     
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
+        "sync_start_time": group.sync_start_time if group else 0,
     })
     
     return {"status": "reordered"}
@@ -874,7 +895,7 @@ def get_player_config(access_code: str, db: Session = Depends(get_db)):
 
 @app.get("/api/player/{access_code}/playlist")
 def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
-    """Get current playlist for a player device based on current time and schedule"""
+    """Get current playlist for a player device with sync timing info for synchronized playback"""
     device = db.query(Device).options(
         joinedload(Device.schedule_group).joinedload(ScheduleGroup.schedules),
         joinedload(Device.schedule_group).joinedload(ScheduleGroup.content_items)
@@ -883,44 +904,23 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
+    # Update last seen
+    device.last_seen = datetime.utcnow()
+    device.is_online = True
+    
     now = datetime.now()
     current_time = now.time()
     current_day = str(now.weekday())
     
     playlist = []
     active_schedule = None
-    debug_info = {
-        "current_time": current_time.strftime("%H:%M:%S"),
-        "current_day": current_day,
-        "has_schedule_group": device.schedule_group is not None,
-        "schedule_group_active": device.schedule_group.is_active if device.schedule_group else False,
-        "total_schedules": 0,
-        "total_content": 0,
-        "schedule_check_results": [],
-    }
     
     # Check if there's an active schedule
     if device.schedule_group and device.schedule_group.is_active:
-        debug_info["total_schedules"] = len(device.schedule_group.schedules)
-        debug_info["total_content"] = len(device.schedule_group.content_items)
-        
         for schedule in device.schedule_group.schedules:
-            schedule_info = {
-                "name": schedule.name,
-                "start": schedule.start_time.strftime("%H:%M"),
-                "end": schedule.end_time.strftime("%H:%M"),
-                "days": schedule.days_of_week,
-                "is_active": schedule.is_active,
-                "day_match": current_day in schedule.days_of_week,
-                "time_match": False,
-                "selected": False,
-            }
-            
             if not schedule.is_active:
-                debug_info["schedule_check_results"].append(schedule_info)
                 continue
             if current_day not in schedule.days_of_week:
-                debug_info["schedule_check_results"].append(schedule_info)
                 continue
             
             # Handle schedules that cross midnight
@@ -929,36 +929,41 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
             else:
                 in_range = current_time >= schedule.start_time or current_time <= schedule.end_time
             
-            schedule_info["time_match"] = in_range
-            
             if in_range:
                 if active_schedule is None or schedule.priority > active_schedule.priority:
                     active_schedule = schedule
-                    schedule_info["selected"] = True
-            
-            debug_info["schedule_check_results"].append(schedule_info)
         
         # Get content from schedule group if schedule is active
         if active_schedule:
             for item in sorted(device.schedule_group.content_items, key=lambda x: x.order):
                 if item.is_active:
                     playlist.append(serialize_content_item(item))
-        
-        # If no active schedule but there's content, optionally play it anyway
-        # This makes testing easier - content plays even without a matching schedule
-        if not active_schedule and len(device.schedule_group.content_items) > 0:
-            debug_info["fallback_mode"] = True
-            # Uncomment the following lines to always play content regardless of schedule:
-            # for item in sorted(device.schedule_group.content_items, key=lambda x: x.order):
-            #     if item.is_active:
-            #         playlist.append(serialize_content_item(item))
     
-    # Get transition settings from schedule group
+    # Get settings from schedule group
     transition_type = "cut"
     transition_duration = 0.5
+    sync_start_time = 0.0
+    
     if device.schedule_group:
         transition_type = device.schedule_group.transition_type or "cut"
         transition_duration = device.schedule_group.transition_duration or 0.5
+        sync_start_time = device.schedule_group.sync_start_time or 0.0
+        
+        # Initialize sync_start_time if not set and we have content
+        if sync_start_time == 0.0 and len(playlist) > 0:
+            sync_start_time = time.time()
+            device.schedule_group.sync_start_time = sync_start_time
+    
+    db.commit()
+    
+    # Calculate total cycle duration (sum of all item durations)
+    total_cycle_duration = 0.0
+    for item in playlist:
+        if item.get("file_type") == "video":
+            # For videos, use actual duration if available, else display_duration
+            total_cycle_duration += item.get("duration") or item.get("display_duration", 10)
+        else:
+            total_cycle_duration += item.get("display_duration", 10)
     
     return {
         "playlist": playlist,
@@ -972,8 +977,13 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
             "flip_horizontal": device.flip_horizontal,
             "flip_vertical": device.flip_vertical,
         },
+        # SYNC INFO - Players use this to calculate current position
+        "sync": {
+            "start_time": sync_start_time,       # Unix timestamp when cycle started
+            "total_duration": total_cycle_duration,  # Total playlist cycle in seconds
+            "server_time": time.time(),          # Current server time for clock sync
+        },
         "server_time": datetime.utcnow().isoformat(),
-        "debug": debug_info,
     }
 
 # ============== WebSocket ==============
@@ -1035,3 +1045,25 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# reset sync timing
+
+@app.post("/api/schedule-groups/{group_id}/reset-sync")
+async def reset_sync_timing(group_id: int, db: Session = Depends(get_db)):
+    """Reset the sync start time for a schedule group.
+    All devices will resync to the new start time on their next poll."""
+    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Schedule group not found")
+    
+    group.sync_start_time = time.time()
+    db.commit()
+    
+    # Notify all connected devices to resync immediately
+    await manager.broadcast({
+        "type": "sync_reset",
+        "group_id": group_id,
+        "sync_start_time": group.sync_start_time,
+    })
+    
+    return {"status": "sync_reset", "sync_start_time": group.sync_start_time}

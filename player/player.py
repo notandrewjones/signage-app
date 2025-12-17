@@ -305,6 +305,9 @@ class PlayerAPI:
                 transition_type = transition.get("type", "cut")
                 transition_duration = transition.get("duration", 0.5)
                 
+                # Get sync settings
+                sync_info = result.get("sync", {})
+                
                 if self.playlist:
                     threading.Thread(target=sync_manager.sync_playlist, args=(self.playlist, config.server_url), daemon=True).start()
                 
@@ -329,6 +332,7 @@ class PlayerAPI:
                     "flip_vertical": self.flip_vertical,
                     "transition_type": transition_type,
                     "transition_duration": transition_duration,
+                    "sync": sync_info,  # Pass sync info to JS
                     "debug": result.get("debug"),
                     "server_url": config.server_url,
                 }
@@ -388,6 +392,7 @@ class PlayerAPI:
 
 
 def get_player_html():
+    """Return the HTML/JS for the synchronized player"""
     return r'''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Digital Signage</title>
 <style>
@@ -395,7 +400,7 @@ def get_player_html():
 body{background:#000;color:#fff;font-family:system-ui;overflow:hidden;width:100vw;height:100vh}
 #player-container{width:100%;height:100%;position:relative}
 #content-display{position:absolute;inset:0;background:#000;z-index:1}
-.content-layer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0;z-index:1}
+.content-layer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0;z-index:1;transition:opacity 0s}
 .content-layer.active{opacity:1}
 .content-layer img,.content-layer video{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain}
 #splash-screen{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#000;z-index:3}
@@ -420,256 +425,681 @@ body{background:#000;color:#fff;font-family:system-ui;overflow:hidden;width:100v
 .connected-info h3{color:#22c55e;margin-bottom:4px}
 .error-message{color:#f87171;margin-top:16px;font-size:14px}
 .hidden{display:none!important}
+#sync-indicator{position:fixed;top:10px;right:10px;padding:8px 16px;background:rgba(0,0,0,0.7);border-radius:8px;font-size:12px;font-family:monospace;z-index:100;display:none}
+#sync-indicator.synced{border:1px solid #22c55e;color:#22c55e}
+#sync-indicator.syncing{border:1px solid #f59e0b;color:#f59e0b}
 </style></head>
 <body>
 <div id="player-container">
-<div id="content-display" class="hidden"><div id="content-layer-0" class="content-layer"></div><div id="content-layer-1" class="content-layer"></div></div>
+<div id="content-display" class="hidden">
+  <div id="content-layer-0" class="content-layer"></div>
+  <div id="content-layer-1" class="content-layer"></div>
+</div>
 <div id="splash-screen" class="hidden"></div>
-<div id="setup-screen"><div class="setup-card"><h1>Digital Signage</h1><p>Connect to your signage server</p>
-<div id="connected-panel" class="hidden"><div class="connected-info"><h3>✓ Connected</h3><p id="device-name-display"></p></div>
-<button class="btn btn-primary" onclick="startPlayback()">Start Display</button>
-<button class="btn btn-secondary" onclick="disconnect()">Disconnect</button></div>
-<div id="connect-panel"><div class="form-group"><label>Server URL</label><input type="text" id="server-url" placeholder="http://192.168.1.100:8000"/></div>
-<div class="form-group"><label>Access Code</label><input type="text" id="access-code" class="code-input" maxlength="6" placeholder="000000"/></div>
-<button class="btn btn-primary" id="connect-btn" onclick="connect()">Connect</button>
-<p id="error-message" class="error-message hidden"></p></div></div></div></div>
-<script>
-let playlist=[],currentIndex=0,playbackTimer=null,pollTimer=null,serverUrl='',activeLayer=0;
-let orientation='landscape',flipH=false,flipV=false,debugMode=false,debugLog=[],lastDebug=null;
-let transitionType='cut',transitionDuration=0.5;
-const setupScreen=document.getElementById('setup-screen');
-const contentDisplay=document.getElementById('content-display');
-const splashScreen=document.getElementById('splash-screen');
-const connectPanel=document.getElementById('connect-panel');
-const connectedPanel=document.getElementById('connected-panel');
-const serverUrlInput=document.getElementById('server-url');
-const accessCodeInput=document.getElementById('access-code');
-const errorMessage=document.getElementById('error-message');
-const deviceNameDisplay=document.getElementById('device-name-display');
-const contentLayers=[document.getElementById('content-layer-0'),document.getElementById('content-layer-1')];
+<div id="setup-screen">
+  <div class="setup-card">
+    <h1>Digital Signage</h1>
+    <p>Connect to your signage server</p>
+    <div id="connected-panel" class="hidden">
+      <div class="connected-info"><h3>✓ Connected</h3><p id="device-name-display"></p></div>
+      <button class="btn btn-primary" onclick="startPlayback()">Start Display</button>
+      <button class="btn btn-secondary" onclick="disconnect()">Disconnect</button>
+    </div>
+    <div id="connect-panel">
+      <div class="form-group"><label>Server URL</label><input type="text" id="server-url" placeholder="http://192.168.1.100:8000"/></div>
+      <div class="form-group"><label>Access Code</label><input type="text" id="access-code" class="code-input" maxlength="6" placeholder="000000"/></div>
+      <button class="btn btn-primary" id="connect-btn" onclick="connect()">Connect</button>
+      <p id="error-message" class="error-message hidden"></p>
+    </div>
+  </div>
+</div>
+<div id="sync-indicator"></div>
+</div>
 
-function applyTransitionStyle(){
-  const dur=transitionType==='cut'?0:transitionDuration;
-  contentLayers.forEach(l=>{l.style.transition=`opacity ${dur}s ease-in-out`});
+<script>
+// ============================================================
+// SYNCHRONIZED PLAYBACK SYSTEM
+// All devices calculate position based on elapsed time since sync_start_time
+// ============================================================
+
+let playlist = [], currentIndex = 0, activeLayer = 0;
+let playbackTimer = null, pollTimer = null, syncCheckInterval = null;
+let serverUrl = '';
+
+// Sync timing variables
+let syncStartTime = 0;        // Unix timestamp when playlist cycle started
+let totalCycleDuration = 0;   // Total duration of one playlist cycle
+let serverTimeOffset = 0;     // Difference between server clock and local clock
+
+// Display settings
+let orientation = 'landscape', flipH = false, flipV = false;
+let transitionType = 'cut', transitionDuration = 0.5;
+let debugMode = false, debugLog = [];
+
+// DOM elements
+const setupScreen = document.getElementById('setup-screen');
+const contentDisplay = document.getElementById('content-display');
+const splashScreen = document.getElementById('splash-screen');
+const connectPanel = document.getElementById('connect-panel');
+const connectedPanel = document.getElementById('connected-panel');
+const serverUrlInput = document.getElementById('server-url');
+const accessCodeInput = document.getElementById('access-code');
+const errorMessage = document.getElementById('error-message');
+const deviceNameDisplay = document.getElementById('device-name-display');
+const contentLayers = [document.getElementById('content-layer-0'), document.getElementById('content-layer-1')];
+const syncIndicator = document.getElementById('sync-indicator');
+const LOCAL_CACHE_URL = 'http://127.0.0.1:8089';
+
+// ============================================================
+// UTILITY FUNCTIONS
+// ============================================================
+
+function log(m) {
+    const entry = `[${new Date().toLocaleTimeString()}] ${m}`;
+    debugLog.push(entry);
+    if (debugLog.length > 100) debugLog.shift();
+    console.log(entry);
+    if (debugMode) updateDebug();
+    try { pywebview.api.log(m); } catch(e) {}
 }
 
-function log(m){const e=`[${new Date().toLocaleTimeString()}] ${m}`;debugLog.push(e);if(debugLog.length>50)debugLog.shift();console.log(e);if(debugMode)updateDebug();try{pywebview.api.log(m)}catch(x){}}
+function updateSyncIndicator(status, info = '') {
+    syncIndicator.style.display = debugMode ? 'block' : 'none';
+    syncIndicator.className = status;
+    syncIndicator.textContent = info;
+}
 
-function updateDebug(){
-let o=document.getElementById('debug-overlay');
-if(!o){o=document.createElement('div');o.id='debug-overlay';o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.95);color:#0f0;font-family:monospace;font-size:12px;padding:20px;overflow:auto;z-index:9999;white-space:pre-wrap';document.body.appendChild(o)}
-const item=playlist[currentIndex];
-let dbg=lastDebug?`Time:${lastDebug.current_time} Day:${lastDebug.current_day}\nSchedules:${lastDebug.total_schedules} Content:${lastDebug.total_content}`:'No debug';
-o.innerHTML=`<b>DEBUG (D=close R=refresh S=setup)</b>\n\nPlaylist: ${playlist.length} items, Index: ${currentIndex}, Layer: ${activeLayer}\nOrientation: ${orientation} FlipH:${flipH} FlipV:${flipV}\nTransition: ${transitionType} (${transitionDuration}s)\n\nCurrent: ${item?item.name+' (local:'+item.use_local+')':'None'}\n\n${dbg}\n\nLog:\n${debugLog.slice(-15).join('\n')}`}
+function applyTransitionStyle() {
+    const dur = transitionType === 'cut' ? 0 : transitionDuration;
+    contentLayers.forEach(l => { l.style.transition = `opacity ${dur}s ease-in-out`; });
+}
 
-function hideDebug(){const o=document.getElementById('debug-overlay');if(o)o.remove()}
+function applyOrientation() {
+    const c = document.getElementById('player-container');
+    let t = '';
+    if (flipH) t += 'scaleX(-1) ';
+    if (flipV) t += 'scaleY(-1) ';
+    c.style.transform = t || 'none';
+}
 
-async function init(){
-log('Init...');
-try{
-const c=await pywebview.api.get_config();
-log('Config: '+JSON.stringify(c));
-if(c.server_url){serverUrlInput.value=c.server_url;serverUrl=c.server_url}
-if(c.is_connected){deviceNameDisplay.textContent=c.device_name||'Device';connectPanel.classList.add('hidden');connectedPanel.classList.remove('hidden');setTimeout(()=>startPlayback(),500)}
-}catch(e){log('Init error: '+e.message)}}
+function getUrl(item) {
+    if (item.use_local && item.filename) {
+        return `${LOCAL_CACHE_URL}/content/${item.filename}`;
+    }
+    if (item.remote_url) return item.remote_url;
+    return serverUrl + item.url;
+}
 
-async function connect(){
-const url=serverUrlInput.value.trim(),code=accessCodeInput.value.trim();
-if(!url||!code){showError('Enter server URL and code');return}
-const btn=document.getElementById('connect-btn');btn.disabled=true;btn.textContent='Connecting...';hideError();
-try{
-const r=await pywebview.api.register(url,code);
-if(r.success){serverUrl=url;deviceNameDisplay.textContent=r.device_name||'Device';connectPanel.classList.add('hidden');connectedPanel.classList.remove('hidden')}
-else showError(r.error||'Failed')
-}catch(e){showError('Error: '+e.message)}
-btn.disabled=false;btn.textContent='Connect'}
+// ============================================================
+// SYNC CALCULATION FUNCTIONS
+// ============================================================
 
-async function disconnect(){await pywebview.api.disconnect();stopPlayback();connectedPanel.classList.add('hidden');connectPanel.classList.remove('hidden');setupScreen.classList.remove('hidden');contentDisplay.classList.add('hidden');splashScreen.classList.add('hidden')}
+// Calculate when each item starts within the playlist cycle
+function calculateItemStartTimes() {
+    let cumulative = 0;
+    playlist.forEach((item, i) => {
+        item._startTime = cumulative;
+        const duration = getItemDuration(item);
+        item._duration = duration;
+        cumulative += duration;
+        item._endTime = cumulative;
+        log(`Item ${i}: "${item.name}" ${item._startTime.toFixed(1)}s-${item._endTime.toFixed(1)}s (${duration}s)`);
+    });
+}
 
-async function startPlayback(){log('Starting...');setupScreen.classList.add('hidden');await syncAndPlay();startPolling()}
+// Get effective duration of a playlist item
+function getItemDuration(item) {
+    if (item.file_type === 'video') {
+        return item.duration || item.display_duration || 10;
+    }
+    return item.display_duration || 10;
+}
 
-async function syncAndPlay(){
-log('Syncing...');
-try{
-const r=await pywebview.api.get_playlist();
-log('Playlist: '+r.success+' items='+(r.playlist?.length||0));
-if(r.success){
-playlist=r.playlist||[];serverUrl=r.server_url||serverUrl;
-orientation=r.orientation||'landscape';flipH=r.flip_horizontal||false;flipV=r.flip_vertical||false;
-transitionType=r.transition_type||'cut';transitionDuration=r.transition_duration||0.5;
-if(r.debug)lastDebug=r.debug;
-applyOrientation();
-applyTransitionStyle();
-log(`Transition: ${transitionType} ${transitionDuration}s`);
-const cached=playlist.filter(i=>i.use_local).length;
-log(`${playlist.length} items, ${cached} cached`);
-if(playlist.length>0){await new Promise(r=>setTimeout(r,500));await preload(0,0);showContent()}
-else showSplash()}
-else showSplash()
-}catch(e){log('Sync error: '+e.message);showSplash()}}
+// Get current position within the playlist cycle
+function getCurrentCyclePosition() {
+    const now = Date.now() / 1000;
+    const serverNow = now + serverTimeOffset;
+    const elapsed = serverNow - syncStartTime;
+    return elapsed % totalCycleDuration;
+}
 
-function applyOrientation(){const c=document.getElementById('player-container');let t='';if(flipH)t+='scaleX(-1) ';if(flipV)t+='scaleY(-1) ';c.style.transform=t||'none'}
+// Find which item should be playing at a given position
+function getItemAtPosition(position) {
+    for (let i = 0; i < playlist.length; i++) {
+        if (position >= playlist[i]._startTime && position < playlist[i]._endTime) {
+            return { 
+                index: i, 
+                elapsed: position - playlist[i]._startTime,
+                remaining: playlist[i]._endTime - position
+            };
+        }
+    }
+    return { index: 0, elapsed: 0, remaining: playlist[0]?._duration || 10 };
+}
 
-const LOCAL_CACHE_URL='http://127.0.0.1:8089';
+// ============================================================
+// INITIALIZATION & CONNECTION
+// ============================================================
 
-function getUrl(item){
-// Use local cache server if content is cached locally
-if(item.use_local&&item.filename){
-return `${LOCAL_CACHE_URL}/content/${item.filename}`}
-if(item.remote_url)return item.remote_url;
-return serverUrl+item.url}
+async function init() {
+    log('Initializing...');
+    try {
+        const c = await pywebview.api.get_config();
+        if (c.server_url) {
+            serverUrlInput.value = c.server_url;
+            serverUrl = c.server_url;
+        }
+        if (c.is_connected) {
+            deviceNameDisplay.textContent = c.device_name || 'Device';
+            connectPanel.classList.add('hidden');
+            connectedPanel.classList.remove('hidden');
+            setTimeout(() => startPlayback(), 500);
+        }
+    } catch (e) {
+        log('Init error: ' + e.message);
+    }
+}
 
-async function preload(idx,layer){
-if(idx>=playlist.length)return;
-const item=playlist[idx],url=getUrl(item),el=contentLayers[layer];
-log(`Preload ${idx} to layer ${layer}: ${item.name}`);
-log(`URL: ${url} (local: ${item.use_local})`);
-el.innerHTML='';
-return new Promise(res=>{
-if(item.file_type==='video'){
-const v=document.createElement('video');v.src=url;v.preload='auto';v.playsInline=true;v.style.objectFit='contain';
-v.onloadeddata=()=>{log('Video ready: '+item.name);res()};v.onerror=()=>{log('Video err: '+url);res()};el.appendChild(v)}
-else{
-const img=document.createElement('img');img.src=url;img.style.objectFit='contain';
-img.onload=()=>{log('Img ready: '+item.name);res()};img.onerror=()=>{log('Img err: '+url);res()};el.appendChild(img)}})}
+async function connect() {
+    const url = serverUrlInput.value.trim();
+    const code = accessCodeInput.value.trim();
+    if (!url || !code) { showError('Enter server URL and code'); return; }
+    
+    const btn = document.getElementById('connect-btn');
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+    hideError();
+    
+    try {
+        const r = await pywebview.api.register(url, code);
+        if (r.success) {
+            serverUrl = url;
+            deviceNameDisplay.textContent = r.device_name || 'Device';
+            connectPanel.classList.add('hidden');
+            connectedPanel.classList.remove('hidden');
+        } else {
+            showError(r.error || 'Connection failed');
+        }
+    } catch (e) {
+        showError('Error: ' + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+}
 
-function showContent(){
-log('showContent');
-splashScreen.classList.add('hidden');
-contentDisplay.classList.remove('hidden');
-currentIndex=0;
-activeLayer=0;
+async function disconnect() {
+    await pywebview.api.disconnect();
+    stopPlayback();
+    connectedPanel.classList.add('hidden');
+    connectPanel.classList.remove('hidden');
+    setupScreen.classList.remove('hidden');
+    contentDisplay.classList.add('hidden');
+    splashScreen.classList.add('hidden');
+}
 
-// First item - show layer 0
-contentLayers[0].style.zIndex='2';
-contentLayers[0].classList.add('active');
-contentLayers[1].style.zIndex='1';
-contentLayers[1].classList.remove('active');
+// ============================================================
+// SYNCHRONIZED PLAYBACK
+// ============================================================
 
-// Start playback
-startCurrentItem();
+async function startPlayback() {
+    log('Starting playback...');
+    setupScreen.classList.add('hidden');
+    await syncAndPlay();
+    startPolling();
+}
 
-// Preload second item into layer 1 (if exists)
-if(playlist.length>1){
-preload(1,1)}}
+async function syncAndPlay() {
+    log('Fetching playlist with sync info...');
+    updateSyncIndicator('syncing', 'Syncing...');
+    
+    try {
+        const r = await pywebview.api.get_playlist();
+        
+        if (!r.success) {
+            log('Playlist fetch failed');
+            showSplash();
+            return;
+        }
+        
+        playlist = r.playlist || [];
+        serverUrl = r.server_url || serverUrl;
+        orientation = r.orientation || 'landscape';
+        flipH = r.flip_horizontal || false;
+        flipV = r.flip_vertical || false;
+        transitionType = r.transition_type || 'cut';
+        transitionDuration = r.transition_duration || 0.5;
+        
+        // Extract sync timing info
+        if (r.sync) {
+            syncStartTime = r.sync.start_time || 0;
+            totalCycleDuration = r.sync.total_duration || 0;
+            serverTimeOffset = (r.sync.server_time || (Date.now()/1000)) - (Date.now() / 1000);
+            log(`Sync info: start=${syncStartTime.toFixed(0)}, cycle=${totalCycleDuration.toFixed(1)}s, offset=${serverTimeOffset.toFixed(3)}s`);
+        }
+        
+        applyOrientation();
+        applyTransitionStyle();
+        
+        const cached = playlist.filter(i => i.use_local).length;
+        log(`Playlist: ${playlist.length} items (${cached} cached)`);
+        
+        if (playlist.length > 0 && totalCycleDuration > 0) {
+            calculateItemStartTimes();
+            await startSyncedPlayback();
+        } else if (playlist.length > 0) {
+            log('No sync info - falling back to sequential playback');
+            // Calculate duration manually
+            totalCycleDuration = playlist.reduce((sum, item) => sum + getItemDuration(item), 0);
+            syncStartTime = Date.now() / 1000;
+            calculateItemStartTimes();
+            await startSyncedPlayback();
+        } else {
+            showSplash();
+        }
+    } catch (e) {
+        log('Sync error: ' + e.message);
+        showSplash();
+    }
+}
 
-function startCurrentItem(){
-if(!playlist.length){showSplash();return}
-const item=playlist[currentIndex];
-log(`Play ${currentIndex}: ${item.name} layer ${activeLayer}`);
+async function startSyncedPlayback() {
+    log('Starting synchronized playback');
+    splashScreen.classList.add('hidden');
+    contentDisplay.classList.remove('hidden');
+    
+    // Calculate current position in the cycle
+    const position = getCurrentCyclePosition();
+    const { index, elapsed, remaining } = getItemAtPosition(position);
+    
+    log(`Cycle position: ${position.toFixed(2)}s -> Item ${index} "${playlist[index]?.name}" (${elapsed.toFixed(1)}s elapsed, ${remaining.toFixed(1)}s remaining)`);
+    updateSyncIndicator('synced', `Item ${index+1}/${playlist.length}`);
+    
+    currentIndex = index;
+    activeLayer = 0;
+    
+    // Preload current and next items
+    await preload(currentIndex, 0);
+    const nextIndex = (currentIndex + 1) % playlist.length;
+    preload(nextIndex, 1);
+    
+    // Show current item, seeking if needed
+    showSyncedItem(elapsed);
+    
+    // Start sync monitoring
+    startSyncLoop();
+}
 
-const currentLayer=contentLayers[activeLayer];
+async function preload(idx, layer) {
+    if (idx >= playlist.length) return;
+    const item = playlist[idx];
+    const url = getUrl(item);
+    const el = contentLayers[layer];
+    
+    el.innerHTML = '';
+    
+    return new Promise(resolve => {
+        if (item.file_type === 'video') {
+            const v = document.createElement('video');
+            v.src = url;
+            v.preload = 'auto';
+            v.playsInline = true;
+            v.muted = false;
+            v.style.objectFit = 'contain';
+            v.onloadeddata = () => resolve();
+            v.onerror = () => { log('Video load error: ' + url); resolve(); };
+            el.appendChild(v);
+        } else {
+            const img = document.createElement('img');
+            img.src = url;
+            img.style.objectFit = 'contain';
+            img.onload = () => resolve();
+            img.onerror = () => { log('Image load error: ' + url); resolve(); };
+            el.appendChild(img);
+        }
+    });
+}
 
-// Set up timing for this item
-const v=currentLayer.querySelector('video');
-if(v){
-v.currentTime=0;
-v.play().catch(e=>log('Play err: '+e.message));
-v.onended=()=>{log('Video ended');doTransition()}}
-else{
-const dur=(item.display_duration||10)*1000;
-log(`Display ${dur}ms`);
-playbackTimer=setTimeout(()=>doTransition(),dur)}}
+function showSyncedItem(elapsedInItem) {
+    const currentLayer = contentLayers[activeLayer];
+    const otherLayer = contentLayers[1 - activeLayer];
+    
+    // Show current layer
+    currentLayer.style.zIndex = '2';
+    currentLayer.classList.add('active');
+    otherLayer.style.zIndex = '1';
+    otherLayer.classList.remove('active');
+    
+    const item = playlist[currentIndex];
+    const video = currentLayer.querySelector('video');
+    
+    if (video && item.file_type === 'video') {
+        // Seek video to correct position and play
+        video.currentTime = elapsedInItem;
+        video.play().catch(e => log('Video play error: ' + e.message));
+        log(`Video "${item.name}" seek to ${elapsedInItem.toFixed(2)}s`);
+    }
+    
+    scheduleNextTransition();
+}
 
-function doTransition(){
-if(playbackTimer){clearTimeout(playbackTimer);playbackTimer=null}
+function scheduleNextTransition() {
+    if (playbackTimer) {
+        clearTimeout(playbackTimer);
+        playbackTimer = null;
+    }
+    
+    const item = playlist[currentIndex];
+    const position = getCurrentCyclePosition();
+    const timeUntilEnd = item._endTime - position;
+    
+    // Schedule transition slightly before to account for processing
+    const delay = Math.max(0, timeUntilEnd * 1000 - 100);
+    
+    log(`Next transition in ${(delay/1000).toFixed(2)}s`);
+    
+    playbackTimer = setTimeout(() => doSyncedTransition(), delay);
+}
 
-// Stop video on current layer
-const v=contentLayers[activeLayer].querySelector('video');
-if(v){v.pause();v.onended=null}
+async function doSyncedTransition() {
+    // Stop current video
+    const currentLayer = contentLayers[activeLayer];
+    const video = currentLayer.querySelector('video');
+    if (video) {
+        video.pause();
+        video.onended = null;
+    }
+    
+    // Calculate what should be playing NOW
+    const position = getCurrentCyclePosition();
+    const { index, elapsed } = getItemAtPosition(position);
+    
+    currentIndex = index;
+    const nextLayer = 1 - activeLayer;
+    
+    log(`Transition to item ${currentIndex} "${playlist[currentIndex]?.name}"`);
+    updateSyncIndicator('synced', `Item ${currentIndex+1}/${playlist.length}`);
+    
+    // If the preloaded item doesn't match, reload
+    const preloadedForNext = (currentIndex === (activeLayer === 0 ? 1 : 0));
+    if (!preloadedForNext) {
+        await preload(currentIndex, nextLayer);
+    }
+    
+    // Perform transition
+    const newLayer = contentLayers[nextLayer];
+    const oldLayer = contentLayers[activeLayer];
+    
+    newLayer.style.zIndex = '2';
+    newLayer.classList.add('active');
+    
+    const transTime = transitionType === 'dissolve' ? transitionDuration * 1000 : 0;
+    
+    setTimeout(async () => {
+        oldLayer.style.zIndex = '1';
+        oldLayer.classList.remove('active');
+        
+        // Preload the next-next item
+        const preloadIndex = (currentIndex + 1) % playlist.length;
+        preload(preloadIndex, activeLayer);
+        
+        activeLayer = nextLayer;
+        
+        // Show the item (will seek video if needed)
+        showSyncedItem(elapsed);
+    }, transTime + 50);
+}
 
-// Move to next item
-currentIndex=(currentIndex+1)%playlist.length;
-const nextLayer=1-activeLayer;
+// ============================================================
+// SYNC MONITORING & CORRECTION
+// ============================================================
 
-log(`Transition to ${currentIndex} on layer ${nextLayer}`);
+function startSyncLoop() {
+    if (syncCheckInterval) clearInterval(syncCheckInterval);
+    
+    // Check sync every 3 seconds
+    syncCheckInterval = setInterval(() => checkAndCorrectSync(), 3000);
+}
 
-const newLayer=contentLayers[nextLayer];
-const oldLayer=contentLayers[activeLayer];
+function checkAndCorrectSync() {
+    const position = getCurrentCyclePosition();
+    const { index, elapsed } = getItemAtPosition(position);
+    
+    // Check if we're on the wrong item
+    if (index !== currentIndex) {
+        log(`SYNC DRIFT: showing item ${currentIndex}, should be ${index} - correcting`);
+        resync();
+        return;
+    }
+    
+    // Check video timing drift
+    const currentLayer = contentLayers[activeLayer];
+    const video = currentLayer.querySelector('video');
+    if (video && playlist[currentIndex]?.file_type === 'video') {
+        const drift = Math.abs(video.currentTime - elapsed);
+        if (drift > 0.5) {  // More than 0.5 second drift
+            log(`VIDEO DRIFT: ${drift.toFixed(2)}s - correcting`);
+            video.currentTime = elapsed;
+        }
+    }
+}
 
-// Bring new layer to front and fade it in
-newLayer.style.zIndex='2';
-newLayer.classList.add('active');
+async function resync() {
+    log('Resyncing...');
+    updateSyncIndicator('syncing', 'Resyncing...');
+    
+    if (playbackTimer) {
+        clearTimeout(playbackTimer);
+        playbackTimer = null;
+    }
+    
+    const position = getCurrentCyclePosition();
+    const { index, elapsed } = getItemAtPosition(position);
+    
+    currentIndex = index;
+    await preload(currentIndex, activeLayer);
+    showSyncedItem(elapsed);
+    
+    // Preload next
+    const nextIndex = (currentIndex + 1) % playlist.length;
+    preload(nextIndex, 1 - activeLayer);
+    
+    updateSyncIndicator('synced', `Item ${currentIndex+1}/${playlist.length}`);
+}
 
-// Keep old layer visible underneath
-oldLayer.style.zIndex='1';
+// ============================================================
+// POLLING FOR UPDATES
+// ============================================================
 
-// Calculate transition time
-const transTime=transitionType==='dissolve'?transitionDuration*1000:0;
+function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    
+    pollTimer = setInterval(async () => {
+        try {
+            const r = await pywebview.api.get_playlist();
+            if (!r.success) return;
+            
+            // Check if sync time changed (content was modified on server)
+            if (r.sync && r.sync.start_time !== syncStartTime) {
+                log('Server sync time changed - full resync');
+                syncStartTime = r.sync.start_time;
+                totalCycleDuration = r.sync.total_duration;
+                serverTimeOffset = r.sync.server_time - (Date.now() / 1000);
+                
+                playlist = r.playlist || [];
+                calculateItemStartTimes();
+                await resync();
+                return;
+            }
+            
+            // Check for playlist changes
+            const newIds = (r.playlist || []).map(i => i.id).join(',');
+            const oldIds = playlist.map(i => i.id).join(',');
+            if (newIds !== oldIds) {
+                log('Playlist items changed - full resync');
+                await syncAndPlay();
+                return;
+            }
+            
+            // Update display settings if changed
+            if (r.orientation !== orientation || r.flip_horizontal !== flipH || r.flip_vertical !== flipV) {
+                orientation = r.orientation || 'landscape';
+                flipH = r.flip_horizontal || false;
+                flipV = r.flip_vertical || false;
+                applyOrientation();
+            }
+        } catch (e) {
+            console.error('Poll error', e);
+        }
+    }, 10000);  // Poll every 10 seconds
+}
 
-// After transition completes
-setTimeout(()=>{
-// Hide old layer
-oldLayer.classList.remove('active');
+function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
 
-// Preload the NEXT next item into the now-hidden old layer
-const preloadIdx=(currentIndex+1)%playlist.length;
-preload(preloadIdx,activeLayer);
+function stopPlayback() {
+    if (playbackTimer) { clearTimeout(playbackTimer); playbackTimer = null; }
+    if (syncCheckInterval) { clearInterval(syncCheckInterval); syncCheckInterval = null; }
+    stopPolling();
+    contentLayers.forEach(l => {
+        const v = l.querySelector('video');
+        if (v) v.pause();
+    });
+}
 
-// Update active layer
-activeLayer=nextLayer;
+// ============================================================
+// SPLASH SCREEN
+// ============================================================
 
-// Start timing for the new current item
-startCurrentItem();
-},transTime+50)}
+async function showSplash() {
+    log('Showing splash screen');
+    contentDisplay.classList.add('hidden');
+    updateSyncIndicator('', '');
+    
+    try {
+        const r = await pywebview.api.get_default_display();
+        if (!r.success || !r.default_display) {
+            splashScreen.innerHTML = '';
+            splashScreen.style.background = '#000';
+            splashScreen.classList.remove('hidden');
+            return;
+        }
+        
+        const d = r.default_display;
+        const srv = r.server_url || serverUrl;
+        
+        splashScreen.innerHTML = '';
+        splashScreen.className = 'position-' + (d.logo_position || 'center');
+        
+        if (d.background_mode === 'solid') {
+            splashScreen.style.background = d.background_color || '#000';
+        } else if (d.background_mode === 'video' && d.background_video_filename) {
+            const url = d.background_video_local_path ? 
+                `${LOCAL_CACHE_URL}/splash/${d.background_video_filename}` : 
+                srv + d.background_video_url;
+            const v = document.createElement('video');
+            v.id = 'splash-background';
+            v.src = url;
+            v.autoplay = true;
+            v.muted = true;
+            v.loop = true;
+            v.playsInline = true;
+            splashScreen.appendChild(v);
+            splashScreen.style.background = '#000';
+        } else if (d.backgrounds?.length) {
+            const bg = d.backgrounds[0];
+            const url = bg.local_path ?
+                `${LOCAL_CACHE_URL}/splash/${bg.filename}` :
+                srv + bg.url;
+            const img = document.createElement('img');
+            img.id = 'splash-background';
+            img.src = url;
+            splashScreen.appendChild(img);
+            splashScreen.style.background = '#000';
+        } else {
+            splashScreen.style.background = d.background_color || '#000';
+        }
+        
+        if (d.logo_filename) {
+            const url = d.logo_local_path ?
+                `${LOCAL_CACHE_URL}/splash/${d.logo_filename}` :
+                srv + d.logo_url;
+            const logo = document.createElement('img');
+            logo.id = 'splash-logo';
+            logo.src = url;
+            logo.style.maxWidth = (d.logo_scale * 100) + '%';
+            logo.style.maxHeight = (d.logo_scale * 80) + '%';
+            splashScreen.appendChild(logo);
+        }
+        
+        splashScreen.classList.remove('hidden');
+    } catch (e) {
+        log('Splash error: ' + e.message);
+        splashScreen.innerHTML = '';
+        splashScreen.style.background = '#000';
+        splashScreen.classList.remove('hidden');
+    }
+}
 
-function nextItem(){
-// Legacy function - redirect to doTransition
-doTransition()}
+// ============================================================
+// DEBUG & UTILITIES
+// ============================================================
 
-async function showSplash(){
-log('Showing splash...');contentDisplay.classList.add('hidden');
-try{
-const r=await pywebview.api.get_default_display();
-if(!r.success||!r.default_display){splashScreen.innerHTML='';splashScreen.style.background='#000';splashScreen.classList.remove('hidden');return}
-const d=r.default_display,srv=r.server_url||serverUrl;
-splashScreen.innerHTML='';splashScreen.className='position-'+(d.logo_position||'center');
-log('Splash mode: '+d.background_mode);
-if(d.background_mode==='solid')splashScreen.style.background=d.background_color||'#000';
-else if(d.background_mode==='video'&&d.background_video_filename){
-// Use local cache if available, otherwise remote
-let url=d.background_video_local_path?`${LOCAL_CACHE_URL}/splash/${d.background_video_filename}`:srv+d.background_video_url;
-log('BG video: '+url);const v=document.createElement('video');v.id='splash-background';v.src=url;v.autoplay=true;v.muted=true;v.loop=true;v.playsInline=true;
-v.onloadeddata=()=>log('BG video loaded');v.onerror=()=>log('BG video err');splashScreen.appendChild(v);splashScreen.style.background='#000'}
-else if((d.background_mode==='image'||d.background_mode==='slideshow')&&d.backgrounds?.length){
-const bg=d.backgrounds[0];
-let url=bg.local_path?`${LOCAL_CACHE_URL}/splash/${bg.filename}`:srv+bg.url;
-const img=document.createElement('img');img.id='splash-background';img.src=url;splashScreen.appendChild(img);splashScreen.style.background='#000'}
-else splashScreen.style.background=d.background_color||'#000';
-if(d.logo_filename){
-// Use local cache if available, otherwise remote
-let url=d.logo_local_path?`${LOCAL_CACHE_URL}/splash/${d.logo_filename}`:srv+d.logo_url;
-log('Logo: '+url);const logo=document.createElement('img');logo.id='splash-logo';logo.src=url;
-logo.style.maxWidth=(d.logo_scale*100)+'%';logo.style.maxHeight=(d.logo_scale*80)+'%';
-logo.onload=()=>log('Logo loaded');logo.onerror=()=>log('Logo err');splashScreen.appendChild(logo)}
-splashScreen.classList.remove('hidden');log('Splash displayed')
-}catch(e){log('Splash err: '+e.message);splashScreen.innerHTML='';splashScreen.style.background='#000';splashScreen.classList.remove('hidden')}}
+function updateDebug() {
+    let o = document.getElementById('debug-overlay');
+    if (!o) {
+        o = document.createElement('div');
+        o.id = 'debug-overlay';
+        o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.95);color:#0f0;font-family:monospace;font-size:11px;padding:20px;overflow:auto;z-index:9999;white-space:pre-wrap';
+        document.body.appendChild(o);
+    }
+    
+    const item = playlist[currentIndex];
+    const pos = getCurrentCyclePosition();
+    const { index, elapsed, remaining } = getItemAtPosition(pos);
+    
+    o.innerHTML = `<b>SYNC DEBUG (D=close R=resync S=setup)</b>
 
-function stopPlayback(){if(playbackTimer){clearTimeout(playbackTimer);playbackTimer=null}stopPolling();contentLayers.forEach(l=>{const v=l.querySelector('video');if(v)v.pause()})}
+Sync Start: ${new Date(syncStartTime * 1000).toLocaleTimeString()}
+Cycle Duration: ${totalCycleDuration.toFixed(1)}s
+Server Offset: ${serverTimeOffset.toFixed(3)}s
+Current Position: ${pos.toFixed(2)}s
 
-function startPolling(){pollTimer=setInterval(async()=>{
-try{const r=await pywebview.api.get_playlist();
-if(r.success){
-const newIds=(r.playlist||[]).map(i=>i.id).join(','),oldIds=playlist.map(i=>i.id).join(',');
-if(r.orientation!==orientation||r.flip_horizontal!==flipH||r.flip_vertical!==flipV){orientation=r.orientation||'landscape';flipH=r.flip_horizontal||false;flipV=r.flip_vertical||false;applyOrientation()}
-if(newIds!==oldIds){log('Playlist changed');playlist=r.playlist||[];serverUrl=r.server_url||serverUrl;
-if(playlist.length){currentIndex=0;await preload(0,0);showContent()}else showSplash()}}}
-catch(e){console.error('Poll err',e)}},30000)}
+Playlist: ${playlist.length} items
+Current Item: ${currentIndex} "${item?.name || 'N/A'}"
+Should Be: ${index} (${elapsed.toFixed(1)}s in, ${remaining.toFixed(1)}s left)
+Active Layer: ${activeLayer}
+Transition: ${transitionType} (${transitionDuration}s)
 
-function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-function showError(m){errorMessage.textContent=m;errorMessage.classList.remove('hidden')}
-function hideError(){errorMessage.classList.add('hidden')}
+Items:
+${playlist.map((p, i) => `  ${i === currentIndex ? '>' : ' '} ${i}: ${p.name} [${p._startTime?.toFixed(1)}-${p._endTime?.toFixed(1)}s]`).join('\n')}
 
-document.addEventListener('keydown',e=>{
-if(e.key==='d'||e.key==='D'){debugMode=!debugMode;if(debugMode)updateDebug();else hideDebug()}
-if(e.key==='r'||e.key==='R'){log('Refresh');syncAndPlay()}
-if(e.key==='s'||e.key==='S'){log('Setup');setupScreen.classList.remove('hidden');contentDisplay.classList.add('hidden');splashScreen.classList.add('hidden')}});
+Log:
+${debugLog.slice(-20).join('\n')}`;
+}
 
-accessCodeInput.addEventListener('input',e=>{e.target.value=e.target.value.replace(/\D/g,'').slice(0,6)});
-accessCodeInput.addEventListener('keydown',e=>{if(e.key==='Enter')connect()});
-window.addEventListener('pywebviewready',init);
-setTimeout(()=>{if(typeof pywebview!=='undefined')init()},1000);
-</script></body></html>'''
+function hideDebug() {
+    const o = document.getElementById('debug-overlay');
+    if (o) o.remove();
+}
+
+function showError(m) { errorMessage.textContent = m; errorMessage.classList.remove('hidden'); }
+function hideError() { errorMessage.classList.add('hidden'); }
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+    if (e.key === 'd' || e.key === 'D') { debugMode = !debugMode; if (debugMode) updateDebug(); else hideDebug(); }
+    if (e.key === 'r' || e.key === 'R') { log('Manual resync'); resync(); }
+    if (e.key === 's' || e.key === 'S') { stopPlayback(); setupScreen.classList.remove('hidden'); contentDisplay.classList.add('hidden'); splashScreen.classList.add('hidden'); }
+});
+
+accessCodeInput.addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });
+accessCodeInput.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+
+window.addEventListener('pywebviewready', init);
+setTimeout(() => { if (typeof pywebview !== 'undefined') init(); }, 1000);
+</script>
+</body></html>'''
 
 
 def main():
