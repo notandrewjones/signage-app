@@ -9,14 +9,42 @@ import random
 import asyncio
 import hashlib
 import socket
-import time as time_module
-from datetime import datetime, time, timedelta
+import time
+import json
+from datetime import datetime, time as dt_time, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
 # Add the server directory to Python path for imports
 SERVER_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SERVER_DIR))
+
+# Load configuration from config.json
+def load_config():
+    """Load configuration from config.json file"""
+    config = {"server_port": 8000}  # defaults
+    
+    # Look for config.json in server dir, then parent (project root)
+    config_paths = [
+        SERVER_DIR / "config.json",
+        SERVER_DIR.parent / "config.json",
+    ]
+    
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    loaded = json.load(f)
+                    config.update(loaded)
+                    print(f"Loaded config from {config_path}")
+                    break
+            except Exception as e:
+                print(f"Warning: Could not load {config_path}: {e}")
+    
+    return config
+
+CONFIG = load_config()
+SERVER_PORT = CONFIG.get("server_port", 8000)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.staticfiles import StaticFiles
@@ -25,7 +53,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, and_, or_
 from sqlalchemy.orm import sessionmaker, Session, joinedload
-import json
 
 from models import (
     Base, ScheduleGroup, Schedule, ContentItem,
@@ -141,6 +168,7 @@ class ScheduleGroupUpdate(BaseModel):
 class ContentItemUpdate(BaseModel):
     name: Optional[str] = None
     display_duration: Optional[float] = None
+    scale_mode: Optional[str] = None  # fit, fill, stretch, blur
     order: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -174,6 +202,8 @@ class DeviceUpdate(BaseModel):
     orientation: Optional[str] = None
     flip_horizontal: Optional[bool] = None
     flip_vertical: Optional[bool] = None
+    background_mode: Optional[str] = None  # solid, blur
+    background_color: Optional[str] = None  # hex color for solid background
     schedule_group_id: Optional[int] = None
 
 class DefaultDisplayUpdate(BaseModel):
@@ -185,10 +215,10 @@ class DefaultDisplayUpdate(BaseModel):
     slideshow_transition: Optional[str] = None
 
 # Helper functions
-def parse_time(time_str: str) -> time:
+def parse_time(time_str: str) -> dt_time:
     """Parse HH:MM string to time object"""
     parts = time_str.split(":")
-    return time(int(parts[0]), int(parts[1]))
+    return dt_time(int(parts[0]), int(parts[1]))
 
 def get_file_hash(file_path: Path) -> str:
     """Calculate MD5 hash of a file"""
@@ -208,6 +238,7 @@ def serialize_content_item(item: ContentItem) -> dict:
         "file_size": item.file_size,
         "duration": item.duration,
         "display_duration": item.display_duration,
+        "scale_mode": item.scale_mode or "fit",
         "width": item.width,
         "height": item.height,
         "order": item.order,
@@ -264,6 +295,8 @@ def serialize_device(device: Device) -> dict:
         "orientation": device.orientation,
         "flip_horizontal": device.flip_horizontal,
         "flip_vertical": device.flip_vertical,
+        "background_mode": device.background_mode or "solid",
+        "background_color": device.background_color or "#000000",
         "schedule_group_id": device.schedule_group_id,
         "schedule_group": serialize_schedule_group(device.schedule_group) if device.schedule_group else None,
         "created_at": device.created_at.isoformat() if device.created_at else None,
@@ -308,6 +341,11 @@ def list_schedule_groups(db: Session = Depends(get_db)):
 
 @app.post("/api/schedule-groups")
 def create_schedule_group(data: ScheduleGroupCreate, db: Session = Depends(get_db)):
+    # Check for duplicate name
+    existing = db.query(ScheduleGroup).filter(ScheduleGroup.name == data.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Schedule group '{data.name}' already exists")
+    
     group = ScheduleGroup(**data.model_dump())
     db.add(group)
     db.commit()
@@ -407,10 +445,6 @@ async def upload_content(
         schedule_group_id=group_id,
     )
     db.add(item)
-    
-    # RESET SYNC TIME when content changes - all devices will resync
-    group.sync_start_time = time_module.time()
-    
     db.commit()
     db.refresh(item)
     
@@ -418,7 +452,6 @@ async def upload_content(
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
-        "sync_start_time": group.sync_start_time,
     })
     
     return serialize_content_item(item)
@@ -449,7 +482,6 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Content item not found")
     
     group_id = item.schedule_group_id
-    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
     
     # Delete file
     file_path = CONTENT_DIR / item.filename
@@ -457,25 +489,17 @@ async def delete_content_item(item_id: int, db: Session = Depends(get_db)):
         file_path.unlink()
     
     db.delete(item)
-    
-    # RESET SYNC TIME when content changes
-    if group:
-        group.sync_start_time = time_module.time()
-    
     db.commit()
     
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
-        "sync_start_time": group.sync_start_time if group else 0,
     })
     
     return {"status": "deleted"}
 
 @app.post("/api/schedule-groups/{group_id}/reorder")
 async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depends(get_db)):
-    group = db.query(ScheduleGroup).filter(ScheduleGroup.id == group_id).first()
-    
     for order, item_id in enumerate(item_ids):
         item = db.query(ContentItem).filter(
             ContentItem.id == item_id,
@@ -484,16 +508,11 @@ async def reorder_content(group_id: int, item_ids: List[int], db: Session = Depe
         if item:
             item.order = order
     
-    # RESET SYNC TIME when order changes
-    if group:
-        group.sync_start_time = time_module.time()
-    
     db.commit()
     
     await manager.broadcast({
         "type": "content_updated",
         "group_id": group_id,
-        "sync_start_time": group.sync_start_time if group else 0,
     })
     
     return {"status": "reordered"}
@@ -951,7 +970,7 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
         
         # Initialize sync_start_time if not set and we have content
         if sync_start_time == 0.0 and len(playlist) > 0:
-            sync_start_time = time_module.time()
+            sync_start_time = time.time()
             device.schedule_group.sync_start_time = sync_start_time
     
     db.commit()
@@ -976,12 +995,14 @@ def get_player_playlist(access_code: str, db: Session = Depends(get_db)):
             "orientation": device.orientation,
             "flip_horizontal": device.flip_horizontal,
             "flip_vertical": device.flip_vertical,
+            "background_mode": device.background_mode or "solid",
+            "background_color": device.background_color or "#000000",
         },
         # SYNC INFO - Players use this to calculate current position
         "sync": {
             "start_time": sync_start_time,       # Unix timestamp when cycle started
             "total_duration": total_cycle_duration,  # Total playlist cycle in seconds
-            "server_time": time_module.time(),          # Current server time for clock sync
+            "server_time": time.time(),          # Current server time for clock sync
         },
         "server_time": datetime.utcnow().isoformat(),
     }
@@ -1035,24 +1056,25 @@ def get_stats(db: Session = Depends(get_db)):
         "total_content": total_content,
     }
 
-# ============== Health Check ==============
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
 # ============== Time Sync (NTP-style) ==============
 
 @app.get("/api/time")
 def get_server_time():
     """Lightweight endpoint for NTP-style time synchronization.
     Returns server time as Unix timestamp with high precision."""
-    return {"time": time_module.time()}
+    return {"time": time.time()}
+
+# ============== Health Check ==============
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"Starting server on http://0.0.0.0:{SERVER_PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
 
 # reset sync timing
 
@@ -1064,7 +1086,7 @@ async def reset_sync_timing(group_id: int, db: Session = Depends(get_db)):
     if not group:
         raise HTTPException(status_code=404, detail="Schedule group not found")
     
-    group.sync_start_time = time_module.time()
+    group.sync_start_time = time.time()
     db.commit()
     
     # Notify all connected devices to resync immediately

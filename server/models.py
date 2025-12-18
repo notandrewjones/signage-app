@@ -35,9 +35,8 @@ class ScheduleGroup(Base):
     transition_type = Column(String(20), default='cut')  # 'cut' or 'dissolve'
     transition_duration = Column(Float, default=0.5)  # seconds (0.1 - 3.0)
     
-    # SYNC: Unix timestamp when the playlist cycle started
-    # All devices use this to calculate their current position
-    sync_start_time = Column(Float, default=0.0)
+    # Sync timing for synchronized playback across devices
+    sync_start_time = Column(Float, default=0.0)  # Unix timestamp when playlist cycle started
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -64,6 +63,7 @@ class ContentItem(Base):
     height = Column(Integer, nullable=True)
     order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+    scale_mode = Column(String(20), default='fit')  # fit, fill, stretch, blur
     schedule_group_id = Column(Integer, ForeignKey('schedule_groups.id'), nullable=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -112,6 +112,10 @@ class Device(Base):
     orientation = Column(String(20), default='landscape')  # 'landscape' or 'portrait'
     flip_horizontal = Column(Boolean, default=False)
     flip_vertical = Column(Boolean, default=False)
+    
+    # Background settings (for letterboxing)
+    background_mode = Column(String(20), default='solid')  # solid, blur
+    background_color = Column(String(7), default='#000000')
     
     schedule_group_id = Column(Integer, ForeignKey('schedule_groups.id'), nullable=True)
     created_at = Column(DateTime, default=func.now())

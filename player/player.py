@@ -414,12 +414,19 @@ def get_player_html():
 <html><head><meta charset="UTF-8"><title>Digital Signage</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font-family:system-ui;overflow:hidden;width:100vw;height:100vh}
-#player-container{width:100%;height:100%;position:relative}
-#content-display{position:absolute;inset:0;background:#000;z-index:1}
-.content-layer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0;z-index:1;transition:opacity 0s}
+html,body{background:#000;color:#fff;font-family:system-ui;overflow:hidden;width:100vw;height:100vh}
+#player-container{width:100%;height:100%;position:relative;background:#000}
+#content-display{position:absolute;inset:0;background:transparent;z-index:1;width:100%;height:100%}
+#background-layer{position:absolute;inset:0;z-index:0;overflow:hidden}
+#background-layer.solid{background-color:var(--bg-color, #000000)}
+#background-layer.blur img,#background-layer.blur video{position:absolute;width:100%;height:100%;object-fit:cover;filter:blur(50px) brightness(0.6);transform:scale(1.1)}
+.content-layer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0;z-index:1;transition:opacity 0s;width:100%;height:100%}
 .content-layer.active{opacity:1}
-.content-layer img,.content-layer video{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain}
+.content-layer img,.content-layer video{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+.content-layer img.scale-fit,.content-layer video.scale-fit{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+.content-layer img.scale-fill,.content-layer video.scale-fill{max-width:none;max-height:none;width:100%;height:100%;object-fit:cover}
+.content-layer img.scale-stretch,.content-layer video.scale-stretch{max-width:none;max-height:none;width:100%;height:100%;object-fit:fill}
+.content-layer img.scale-blur,.content-layer video.scale-blur{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
 #splash-screen{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#000;z-index:3}
 #splash-screen.position-top{align-items:flex-start;padding-top:5%}
 #splash-screen.position-bottom{align-items:flex-end;padding-bottom:5%}
@@ -449,6 +456,7 @@ body{background:#000;color:#fff;font-family:system-ui;overflow:hidden;width:100v
 <body>
 <div id="player-container">
 <div id="content-display" class="hidden">
+  <div id="background-layer"></div>
   <div id="content-layer-0" class="content-layer"></div>
   <div id="content-layer-1" class="content-layer"></div>
 </div>
@@ -490,6 +498,7 @@ let serverTimeOffset = 0;     // Difference between server clock and local clock
 
 // Display settings
 let orientation = 'landscape', flipH = false, flipV = false;
+let backgroundMode = 'solid', backgroundColor = '#000000';
 let transitionType = 'cut', transitionDuration = 0.5;
 let debugMode = false, debugLog = [];
 
@@ -497,6 +506,7 @@ let debugMode = false, debugLog = [];
 const setupScreen = document.getElementById('setup-screen');
 const contentDisplay = document.getElementById('content-display');
 const splashScreen = document.getElementById('splash-screen');
+const backgroundLayer = document.getElementById('background-layer');
 const connectPanel = document.getElementById('connect-panel');
 const connectedPanel = document.getElementById('connected-panel');
 const serverUrlInput = document.getElementById('server-url');
@@ -534,10 +544,38 @@ function applyTransitionStyle() {
 function applyOrientation() {
     const c = document.getElementById('player-container');
     let t = '';
+    
+    // Apply flips first
     if (flipH) t += 'scaleX(-1) ';
     if (flipV) t += 'scaleY(-1) ';
+    
+    // Apply rotation for portrait mode (90 degrees clockwise)
+    if (orientation === 'portrait') {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        t += 'rotate(90deg) ';
+        // After rotation, swap dimensions to fill screen
+        c.style.width = vh + 'px';
+        c.style.height = vw + 'px';
+        c.style.transformOrigin = 'center center';
+        c.style.position = 'absolute';
+        c.style.left = ((vw - vh) / 2) + 'px';
+        c.style.top = ((vh - vw) / 2) + 'px';
+    } else {
+        // Landscape - reset to normal
+        c.style.width = '100%';
+        c.style.height = '100%';
+        c.style.transformOrigin = 'center center';
+        c.style.position = 'relative';
+        c.style.left = '0';
+        c.style.top = '0';
+    }
+    
     c.style.transform = t || 'none';
 }
+
+// Reapply orientation on window resize
+window.addEventListener('resize', () => { if (orientation) applyOrientation(); });
 
 function getUrl(item) {
     if (item.use_local && item.filename) {
@@ -783,6 +821,8 @@ async function syncAndPlay() {
         orientation = r.orientation || 'landscape';
         flipH = r.flip_horizontal || false;
         flipV = r.flip_vertical || false;
+        backgroundMode = r.background_mode || 'solid';
+        backgroundColor = r.background_color || '#000000';
         transitionType = r.transition_type || 'cut';
         transitionDuration = r.transition_duration || 0.5;
         
@@ -855,6 +895,7 @@ async function preload(idx, layer) {
     const item = playlist[idx];
     const url = getUrl(item);
     const el = contentLayers[layer];
+    const scaleMode = item.scale_mode || 'fit';
     
     el.innerHTML = '';
     
@@ -865,19 +906,75 @@ async function preload(idx, layer) {
             v.preload = 'auto';
             v.playsInline = true;
             v.muted = false;
-            v.style.objectFit = 'contain';
+            v.className = 'scale-' + scaleMode;
             v.onloadeddata = () => resolve();
             v.onerror = () => { log('Video load error: ' + url); resolve(); };
             el.appendChild(v);
         } else {
             const img = document.createElement('img');
             img.src = url;
-            img.style.objectFit = 'contain';
+            img.className = 'scale-' + scaleMode;
             img.onload = () => resolve();
             img.onerror = () => { log('Image load error: ' + url); resolve(); };
             el.appendChild(img);
         }
     });
+}
+
+// Update background layer based on current content and settings
+function updateBackground(item) {
+    if (!item) {
+        backgroundLayer.innerHTML = '';
+        backgroundLayer.className = 'solid';
+        backgroundLayer.style.setProperty('--bg-color', backgroundColor);
+        return;
+    }
+    
+    const scaleMode = item.scale_mode || 'fit';
+    const url = getUrl(item);
+    
+    // For 'blur' scale mode, use the media itself as blurred background
+    if (scaleMode === 'blur') {
+        backgroundLayer.className = 'blur';
+        backgroundLayer.innerHTML = '';
+        if (item.file_type === 'video') {
+            const v = document.createElement('video');
+            v.src = url;
+            v.autoplay = true;
+            v.loop = true;
+            v.muted = true;
+            v.playsInline = true;
+            backgroundLayer.appendChild(v);
+        } else {
+            const img = document.createElement('img');
+            img.src = url;
+            backgroundLayer.appendChild(img);
+        }
+    } 
+    // For device-level background mode 'blur', use current media as background
+    else if (backgroundMode === 'blur' && scaleMode === 'fit') {
+        backgroundLayer.className = 'blur';
+        backgroundLayer.innerHTML = '';
+        if (item.file_type === 'video') {
+            const v = document.createElement('video');
+            v.src = url;
+            v.autoplay = true;
+            v.loop = true;
+            v.muted = true;
+            v.playsInline = true;
+            backgroundLayer.appendChild(v);
+        } else {
+            const img = document.createElement('img');
+            img.src = url;
+            backgroundLayer.appendChild(img);
+        }
+    }
+    // Solid color background
+    else {
+        backgroundLayer.className = 'solid';
+        backgroundLayer.innerHTML = '';
+        backgroundLayer.style.setProperty('--bg-color', backgroundColor);
+    }
 }
 
 function showSyncedItem(elapsedInItem) {
@@ -891,6 +988,10 @@ function showSyncedItem(elapsedInItem) {
     otherLayer.classList.remove('active');
     
     const item = playlist[currentIndex];
+    
+    // Update background for current item
+    updateBackground(item);
+    
     const video = currentLayer.querySelector('video');
     
     if (video && item.file_type === 'video') {
@@ -898,6 +999,13 @@ function showSyncedItem(elapsedInItem) {
         video.currentTime = elapsedInItem;
         video.play().catch(e => log('Video play error: ' + e.message));
         log(`Video "${item.name}" seek to ${elapsedInItem.toFixed(2)}s`);
+        
+        // Sync background video too if blur mode
+        const bgVideo = backgroundLayer.querySelector('video');
+        if (bgVideo) {
+            bgVideo.currentTime = elapsedInItem;
+            bgVideo.play().catch(() => {});
+        }
     }
     
     scheduleNextTransition();
@@ -1148,6 +1256,15 @@ function startPolling() {
                 flipH = r.flip_horizontal || false;
                 flipV = r.flip_vertical || false;
                 applyOrientation();
+            }
+            
+            // Update background settings if changed
+            if (r.background_mode !== backgroundMode || r.background_color !== backgroundColor) {
+                backgroundMode = r.background_mode || 'solid';
+                backgroundColor = r.background_color || '#000000';
+                if (playlist.length > 0 && currentIndex < playlist.length) {
+                    updateBackground(playlist[currentIndex]);
+                }
             }
         } catch (e) {
             console.error('Poll error', e);
