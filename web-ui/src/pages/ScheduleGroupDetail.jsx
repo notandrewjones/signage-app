@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   ArrowLeft, Save, Trash2, Plus, Clock, Calendar, 
-  Play, Pause, Image, Video, GripVertical, Eye, EyeOff
+  Play, Pause, Image, Video, GripVertical, Eye, EyeOff,
+  Maximize, Square, RectangleHorizontal, Sparkles, ChevronDown
 } from 'lucide-react';
 import { 
   useScheduleGroup, updateScheduleGroup, deleteScheduleGroup,
@@ -15,6 +16,13 @@ import {
 } from '../components/ui';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+const SCALE_MODES = [
+  { value: 'fit', label: 'Scale to Fit', icon: RectangleHorizontal, description: 'Fit within frame, may show background' },
+  { value: 'fill', label: 'Scale to Fill', icon: Maximize, description: 'Fill frame, may crop edges' },
+  { value: 'stretch', label: 'Stretch to Fill', icon: Square, description: 'Stretch to fill, may distort' },
+  { value: 'blur', label: 'Fit with Blur', icon: Sparkles, description: 'Fit with blurred background' },
+];
 
 function ScheduleForm({ schedule, onSave, onCancel }) {
   const [name, setName] = useState(schedule?.name || '');
@@ -102,56 +110,185 @@ function ScheduleForm({ schedule, onSave, onCancel }) {
   );
 }
 
-function ContentItemCard({ item, onToggle, onEdit, onDelete, onDragStart, onDragOver, onDrop, isDragging }) {
+function ContentItemCard({ item, onUpdate, onToggle, onDelete, onDragStart, onDragOver, onDrop, isDragging }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [duration, setDuration] = useState(item.display_duration || 10);
+  const [scaleMode, setScaleMode] = useState(item.scale_mode || 'fit');
+  const [saving, setSaving] = useState(false);
+  
+  const isVideo = item.file_type === 'video';
+  const currentScaleMode = SCALE_MODES.find(m => m.value === (item.scale_mode || 'fit'));
+  
+  const handleSaveSettings = async () => {
+    setSaving(true);
+    await onUpdate(item.id, { 
+      display_duration: duration,
+      scale_mode: scaleMode 
+    });
+    setSaving(false);
+    setIsExpanded(false);
+  };
+  
+  const handleDurationChange = (e) => {
+    const value = parseFloat(e.target.value);
+    if (!isNaN(value) && value > 0) {
+      setDuration(value);
+    }
+  };
+  
   return (
     <div 
       draggable
       onDragStart={(e) => onDragStart(e, item)}
       onDragOver={onDragOver}
       onDrop={(e) => onDrop(e, item)}
-      className={`flex items-center gap-4 p-4 bg-surface-800 rounded-xl transition-all ${
+      className={`bg-surface-800 rounded-xl transition-all ${
         isDragging ? 'opacity-50' : ''
       } ${!item.is_active ? 'opacity-60' : ''}`}
     >
-      <div className="cursor-grab active:cursor-grabbing text-surface-500 hover:text-surface-300">
-        <GripVertical className="w-5 h-5" />
-      </div>
-      
-      <div className="w-24 h-16 bg-surface-900 rounded-lg overflow-hidden flex-shrink-0">
-        {item.file_type === 'video' ? (
-          <video src={item.url} className="w-full h-full object-cover" muted />
-        ) : (
-          <img src={item.url} alt={item.name} className="w-full h-full object-cover" />
-        )}
-      </div>
-      
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          {item.file_type === 'video' ? (
-            <Video className="w-4 h-4 text-purple-400" />
+      {/* Main Row */}
+      <div className="flex items-center gap-4 p-4">
+        <div className="cursor-grab active:cursor-grabbing text-surface-500 hover:text-surface-300">
+          <GripVertical className="w-5 h-5" />
+        </div>
+        
+        <div className="w-24 h-16 bg-surface-900 rounded-lg overflow-hidden flex-shrink-0">
+          {isVideo ? (
+            <video src={item.url} className="w-full h-full object-cover" muted />
           ) : (
-            <Image className="w-4 h-4 text-blue-400" />
+            <img src={item.url} alt={item.name} className="w-full h-full object-cover" />
           )}
-          <span className="font-medium truncate">{item.name}</span>
         </div>
-        <div className="text-sm text-surface-500 mt-1">
-          {item.file_type === 'video' && item.duration 
-            ? `${Math.round(item.duration)}s video`
-            : `${item.display_duration}s display`
-          }
-          <span className="mx-2">•</span>
-          {(item.file_size / 1024 / 1024).toFixed(1)} MB
+        
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            {isVideo ? (
+              <Video className="w-4 h-4 text-purple-400" />
+            ) : (
+              <Image className="w-4 h-4 text-blue-400" />
+            )}
+            <span className="font-medium truncate">{item.name}</span>
+            {!item.is_active && <Badge color="gray">Hidden</Badge>}
+          </div>
+          <div className="flex items-center gap-3 text-sm text-surface-500 mt-1">
+            <span className="flex items-center gap-1">
+              <Clock className="w-3 h-3" />
+              {item.display_duration}s
+            </span>
+            <span>•</span>
+            <span className="flex items-center gap-1">
+              {currentScaleMode && <currentScaleMode.icon className="w-3 h-3" />}
+              {currentScaleMode?.label || 'Scale to Fit'}
+            </span>
+            <span>•</span>
+            <span>{(item.file_size / 1024 / 1024).toFixed(1)} MB</span>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-1">
+          <button 
+            onClick={() => setIsExpanded(!isExpanded)} 
+            className={`btn btn-ghost p-2 rounded-lg transition-colors ${isExpanded ? 'bg-surface-700' : ''}`}
+            title="Edit settings"
+          >
+            <ChevronDown className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+          </button>
+          <button 
+            onClick={() => onToggle(item)} 
+            className="btn btn-ghost p-2 rounded-lg" 
+            title={item.is_active ? 'Hide' : 'Show'}
+          >
+            {item.is_active ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+          </button>
+          <button 
+            onClick={() => onDelete(item)} 
+            className="btn btn-ghost p-2 rounded-lg text-red-400 hover:text-red-300 hover:bg-red-500/10"
+            title="Delete"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
       </div>
       
-      <div className="flex items-center gap-2">
-        <button onClick={() => onToggle(item)} className="btn btn-icon btn-ghost" title={item.is_active ? 'Disable' : 'Enable'}>
-          {item.is_active ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-        </button>
-        <button onClick={() => onDelete(item)} className="btn btn-icon btn-ghost text-red-400 hover:text-red-300">
-          <Trash2 className="w-4 h-4" />
-        </button>
-      </div>
+      {/* Expanded Settings Panel */}
+      {isExpanded && (
+        <div className="px-4 pb-4 pt-2 border-t border-surface-700 ml-9">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Duration */}
+            <div>
+              <label className="block text-sm font-medium text-surface-300 mb-2">
+                Display Duration (seconds)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={duration}
+                  onChange={handleDurationChange}
+                  min="1"
+                  max="3600"
+                  step="1"
+                  className="input w-24"
+                />
+                <span className="text-sm text-surface-500">seconds</span>
+              </div>
+              {isVideo && item.duration && (
+                <p className="text-xs text-surface-500 mt-1">
+                  Video length: {Math.round(item.duration)}s
+                  <button 
+                    onClick={() => setDuration(Math.round(item.duration))}
+                    className="text-accent hover:text-accent-400 ml-2"
+                  >
+                    Use video length
+                  </button>
+                </p>
+              )}
+            </div>
+            
+            {/* Scale Mode */}
+            <div>
+              <label className="block text-sm font-medium text-surface-300 mb-2">
+                Scale Mode
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {SCALE_MODES.map(mode => (
+                  <button
+                    key={mode.value}
+                    onClick={() => setScaleMode(mode.value)}
+                    className={`flex items-center gap-2 p-2 rounded-lg text-left text-sm transition-colors ${
+                      scaleMode === mode.value
+                        ? 'bg-accent text-white'
+                        : 'bg-surface-700 text-surface-300 hover:bg-surface-600'
+                    }`}
+                    title={mode.description}
+                  >
+                    <mode.icon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">{mode.label}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-surface-500 mt-2">
+                {SCALE_MODES.find(m => m.value === scaleMode)?.description}
+              </p>
+            </div>
+          </div>
+          
+          <div className="flex justify-end gap-2 mt-4">
+            <button 
+              onClick={() => setIsExpanded(false)} 
+              className="btn btn-secondary btn-sm"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={handleSaveSettings} 
+              className="btn btn-primary btn-sm"
+              disabled={saving}
+            >
+              {saving ? 'Saving...' : 'Save Changes'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -268,6 +405,15 @@ export default function ScheduleGroupDetail() {
       setToast({ message: error.message, type: 'error' });
     } finally {
       setUploading(false);
+    }
+  };
+  
+  const handleUpdateItem = async (itemId, data) => {
+    try {
+      await updateContentItem(itemId, data);
+      refetch();
+    } catch (error) {
+      setToast({ message: error.message, type: 'error' });
     }
   };
   
@@ -403,8 +549,8 @@ export default function ScheduleGroupDetail() {
                 <ContentItemCard
                   key={item.id}
                   item={item}
+                  onUpdate={handleUpdateItem}
                   onToggle={handleToggleItemActive}
-                  onEdit={() => {}}
                   onDelete={() => setDeleteItemConfirm(item)}
                   onDragStart={handleDragStart}
                   onDragOver={handleDragOver}

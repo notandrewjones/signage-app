@@ -1241,13 +1241,45 @@ function startPolling() {
                 return;
             }
             
-            // Check for playlist changes
+            // Check for playlist changes (items added/removed)
             const newIds = (r.playlist || []).map(i => i.id).join(',');
             const oldIds = playlist.map(i => i.id).join(',');
             if (newIds !== oldIds) {
                 log('Playlist items changed - full resync');
                 await syncAndPlay();
                 return;
+            }
+            
+            // Check for content property changes (scale_mode, duration, etc.)
+            const newPlaylist = r.playlist || [];
+            let contentChanged = false;
+            for (let i = 0; i < newPlaylist.length; i++) {
+                const newItem = newPlaylist[i];
+                const oldItem = playlist.find(p => p.id === newItem.id);
+                if (oldItem) {
+                    if (oldItem.scale_mode !== newItem.scale_mode ||
+                        oldItem.display_duration !== newItem.display_duration ||
+                        oldItem.is_active !== newItem.is_active) {
+                        contentChanged = true;
+                        log(`Content item ${newItem.id} changed: scale=${newItem.scale_mode}, duration=${newItem.display_duration}`);
+                        break;
+                    }
+                }
+            }
+            
+            if (contentChanged) {
+                log('Content properties changed - updating playlist');
+                playlist = newPlaylist;
+                totalCycleDuration = r.sync?.total_duration || totalCycleDuration;
+                calculateItemStartTimes();
+                // Re-preload current item with new settings
+                await preload(currentIndex, activeLayer);
+                // Update background in case scale_mode changed to/from blur
+                updateBackground(playlist[currentIndex]);
+                // Reapply current item display
+                const pos = getCurrentCyclePosition();
+                const { elapsed } = getItemAtPosition(pos);
+                showSyncedItem(elapsed);
             }
             
             // Update display settings if changed
@@ -1269,7 +1301,7 @@ function startPolling() {
         } catch (e) {
             console.error('Poll error', e);
         }
-    }, 10000);  // Poll every 10 seconds
+    }, 5000);  // Poll every 5 seconds for responsive updates
 }
 
 function stopPolling() {
